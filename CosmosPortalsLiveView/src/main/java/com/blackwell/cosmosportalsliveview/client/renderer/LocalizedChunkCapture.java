@@ -110,6 +110,11 @@ public class LocalizedChunkCapture {
         final BlockPos destPos   = portalData.destPos;
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
+        // Parallax: lateral shift of the virtual camera at the destination.
+        // parallaxOffsetRight/Up are in portal-local space and map directly to
+        // the destination camera's right/up axes (same orientation as source portal).
+        final float parallaxRight = portalData.parallaxOffsetRight;
+        final float parallaxUp    = portalData.parallaxOffsetUp;
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
@@ -117,6 +122,7 @@ public class LocalizedChunkCapture {
                 image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
+                                              parallaxRight, parallaxUp,
                                               entityDots);
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
@@ -167,6 +173,7 @@ public class LocalizedChunkCapture {
                                                       float yawDeg, float pitchDeg,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
+                                                      float parallaxRight, float parallaxUp,
                                                       List<EntityDot> entityDots) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
@@ -187,6 +194,16 @@ public class LocalizedChunkCapture {
         double upX = -rightZ * fwdY;
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
+
+        // Apply parallax: shift virtual eye position laterally using the portal's
+        // right and up axes. parallaxRight/Up come from the player's offset at the
+        // source portal projected onto portal-local axes.
+        // Clamp to portal half-size so extreme angles don't go wild.
+        float clampedRight = Math.max(-portalHalfW, Math.min(portalHalfW, parallaxRight));
+        float clampedUp    = Math.max(-portalHalfH, Math.min(portalHalfH, parallaxUp));
+        eyeX += rightX * clampedRight + upX * clampedUp;
+        eyeY +=                         upY * clampedUp;
+        eyeZ += rightZ * clampedRight + upZ * clampedUp;
 
         double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
         double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;

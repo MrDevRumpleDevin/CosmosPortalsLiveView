@@ -387,6 +387,28 @@ public class PortalRenderEventHandler {
         // in front of CosmosPortals' color layer). Negative = toward player based on the
         // previous test where +0.52 went away from the player.
         // The per-dock offset (cycled with sneak+right-click wand) is added on top.
+        // ── Parallax: project camera offset onto portal-local axes ─────────────
+        // Portal right/up vectors:
+        //   axis=X (face normal ±Z): right=+X, up=+Y
+        //   axis=Z (face normal ±X): right=+Z, up=+Y
+        // Player eye offset from portal center, projected onto those axes.
+        {
+            Vec3 camPos3 = camera.getPosition();
+            double pex = camPos3.x - centerX;
+            double pey = camPos3.y - centerY;
+            double pez = camPos3.z - centerZ;
+            float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
+            if (isXAxis) {
+                // right = X, up = Y
+                data.parallaxOffsetRight = (float)(pex * scale);
+                data.parallaxOffsetUp    = (float)(pey * scale);
+            } else {
+                // right = Z, up = Y
+                data.parallaxOffsetRight = (float)(pez * scale);
+                data.parallaxOffsetUp    = (float)(pey * scale);
+            }
+        }
+
         final float FACE_OFFSET = 0.0f + LiveViewState.getOffset(dockPos);
 
         double camX = camera.getPosition().x;

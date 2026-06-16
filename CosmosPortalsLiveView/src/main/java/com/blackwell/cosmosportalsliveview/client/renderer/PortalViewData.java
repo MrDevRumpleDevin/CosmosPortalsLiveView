@@ -40,6 +40,14 @@ public class PortalViewData {
     public volatile float portalHalfW = 1.0f;
     public volatile float portalHalfH = 1.0f;
 
+    /**
+     * Player's lateral offset from the portal center projected onto the portal's
+     * right and up axes. Updated each render frame on the main thread.
+     * Consumed by captureAsync to shift the virtual camera, producing parallax.
+     */
+    public volatile float parallaxOffsetRight = 0f;
+    public volatile float parallaxOffsetUp    = 0f;
+
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
 

@@ -12,6 +12,7 @@ public class PortalLiveViewConfig {
     public static final ForgeConfigSpec.IntValue CAPTURE_RESOLUTION;
     public static final ForgeConfigSpec.IntValue CAPTURE_INTERVAL_MS;
     public static final ForgeConfigSpec.IntValue PORTALS_PER_FRAME;
+    public static final ForgeConfigSpec.DoubleValue PARALLAX_SCALE;
     
     static {
         BUILDER.comment("CosmosPortals Live View Configuration").push("general");
@@ -35,6 +36,10 @@ public class PortalLiveViewConfig {
         PORTALS_PER_FRAME = BUILDER
             .comment("Maximum portals to update per frame (1-3 recommended)")
             .defineInRange("portalsPerFrame", 1, 1, 3);
+
+        PARALLAX_SCALE = BUILDER
+            .comment("Parallax perspective scale (0.0 = no parallax, 1.0 = true 1:1 window). 0.7 recommended.")
+            .defineInRange("parallaxScale", 0.7, 0.0, 2.0);
         
         BUILDER.pop();
         SPEC = BUILDER.build();
