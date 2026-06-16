@@ -64,7 +64,7 @@ public class LocalizedChunkCapture {
      * several blocks in front of it after crossing. This offset corrects for that
      * so the live view matches what you'd see standing at the exit.
      */
-    private static final float EYE_FORWARD_OFFSET = 0.0f;
+    private static final float EYE_FORWARD_OFFSET = -0.5f;
     private static final int     MAX_RAY_DIST     = 48;
     private static final double  ENTITY_SCAN_RADIUS = 32.0;
 
