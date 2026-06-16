@@ -324,17 +324,29 @@ public class PortalRenderEventHandler {
             maxZ = Math.max(maxZ, bp.getZ());
         }
 
-        // Determine portal orientation. Primary: bounding-box span — this is deterministic.
-        // axis=X: portal blocks span along X (face normal ±Z, player walks N/S through it)
-        // axis=Z: portal blocks span along Z (face normal ±X, player walks E/W through it)
-        int spanX = maxX - minX;
-        int spanZ = maxZ - minZ;
+        // Determine portal orientation.
+        // axis=X: portal blocks span along X, zero span along Z (face normal ±Z, player walks N/S)
+        // axis=Z: portal blocks span along Z, zero span along X (face normal ±X, player walks E/W)
+        //
+        // We vote across ALL portal blocks: count how many unique X values vs unique Z values exist.
+        // A flat N/S-facing portal has 1 unique X but many unique Z → spanZ wins.
+        // A flat E/W-facing portal has many unique X but 1 unique Z → spanX wins.
+        // This is robust against frame corners that might inflate the raw min/max span.
+        java.util.Set<Integer> uniqueXSet = new java.util.HashSet<>();
+        java.util.Set<Integer> uniqueZSet = new java.util.HashSet<>();
+        for (BlockPos bp : frameBlocks) {
+            uniqueXSet.add(bp.getX());
+            uniqueZSet.add(bp.getZ());
+        }
+        int uniqueX = uniqueXSet.size();
+        int uniqueZ = uniqueZSet.size();
+
         boolean isXAxis;
-        if (spanX != spanZ) {
-            // Clear span winner — trust the geometry, ignore blockstate
-            isXAxis = spanX > spanZ;
+        if (uniqueX != uniqueZ) {
+            // More unique X values → portal spans X → face normal ±Z (axis=X)
+            isXAxis = uniqueX > uniqueZ;
         } else {
-            // Ambiguous (single block or perfect square) — fall back to blockstate
+            // Ambiguous — fall back to blockstate
             BlockState portalState = level.getBlockState(data.portalPos);
             isXAxis = false;
             try {
