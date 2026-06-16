@@ -324,14 +324,27 @@ public class PortalRenderEventHandler {
             maxZ = Math.max(maxZ, bp.getZ());
         }
 
-        BlockState portalState = level.getBlockState(data.portalPos);
-        boolean isXAxis = false;
-        try {
-            if (portalState.hasProperty(BlockStateProperties.AXIS)) {
-                net.minecraft.core.Direction.Axis axis = portalState.getValue(BlockStateProperties.AXIS);
-                isXAxis = (axis == net.minecraft.core.Direction.Axis.X);
-            }
-        } catch (Exception ignored) {}
+        // Determine portal orientation from bounding box spans — more reliable than
+        // reading the blockstate AXIS property (avoids any property-lookup silent failures).
+        // axis=X portal: blocks span along X (maxX-minX > maxZ-minZ), face normal ±Z.
+        // axis=Z portal: blocks span along Z (maxZ-minZ > maxX-minX), face normal ±X.
+        // For a 1-block-wide portal both spans may be equal — fall back to blockstate.
+        boolean isXAxis;
+        int spanX = maxX - minX;
+        int spanZ = maxZ - minZ;
+        if (spanX != spanZ) {
+            isXAxis = (spanX > spanZ);
+        } else {
+            // Spans equal (single column or square) — read blockstate as tiebreaker
+            BlockState portalState = level.getBlockState(data.portalPos);
+            isXAxis = false;
+            try {
+                if (portalState.hasProperty(BlockStateProperties.AXIS)) {
+                    net.minecraft.core.Direction.Axis axis = portalState.getValue(BlockStateProperties.AXIS);
+                    isXAxis = (axis == net.minecraft.core.Direction.Axis.X);
+                }
+            } catch (Exception ignored) {}
+        }
 
         double centerX = (minX + maxX) / 2.0 + 0.5;
         double centerY = (minY + maxY) / 2.0 + 0.5;

@@ -44,21 +44,17 @@ public class PortalViewData {
         BlockPos dp = entity.getDestPos();
         this.destPos = (dp != null && !dp.equals(BlockPos.ZERO)) ? dp : null;
 
-        // Read the yaw/pitch stored in destInfo (set by the dock from the dimension container).
+        // Read the yaw/pitch stored in destInfo.
+        // getYaw() → player yaw at link time (MC convention: 0=south, 90=west, -90/270=east, 180=north)
+        // getPitch() → player pitch at link time (MC convention: negative=up, positive=down)
         //
-        // CosmosPortals bug/quirk: ItemPortalContainer.onContainerLink() stores the player's
-        // rotation via Entity.getRotationVector() which returns Vec2(xRot, yRot) = Vec2(pitch, yaw).
-        // It then saves Vec2.x → "pos_yaw" and Vec2.y → "pos_pitch" — the names are SWAPPED.
-        // AbstractBlockEntityPortalDock reads them in the same swapped order into setDestInfo(),
-        // so ultimately:
-        //   destInfo.getYaw()   → actual player PITCH value
-        //   destInfo.getPitch() → actual player YAW value
-        //
-        // We compensate here by reading them cross-wise:
+        // The raycaster fwdY = -sin(pitchRad), so positive pitch → looking down.
+        // MC pitch -90 = straight up, 0 = horizontal, +90 = straight down — same sign convention.
+        // No swap or negation needed; read straight.
         float yaw = 0f, pitch = 0f;
         try {
-            yaw   = entity.destInfo.getPitch(); // getPitch() holds the actual YAW
-            pitch = entity.destInfo.getYaw();   // getYaw()   holds the actual PITCH
+            yaw   = entity.destInfo.getYaw();
+            pitch = entity.destInfo.getPitch();
         } catch (Exception ignored) {}
         this.destYaw   = yaw;
         this.destPitch = pitch;
