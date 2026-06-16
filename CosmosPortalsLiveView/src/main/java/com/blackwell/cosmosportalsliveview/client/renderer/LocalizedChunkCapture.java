@@ -57,6 +57,14 @@ public class LocalizedChunkCapture {
      * subtends ~26°, 3-block portal ~56°.  Tune this to taste.
      */
     private static final float VIRTUAL_SCREEN_DIST = 2.0f;
+
+    /**
+     * How many blocks to push the render eye forward along the view direction.
+     * destPos is the destination portal block itself; the player actually stands
+     * several blocks in front of it after crossing. This offset corrects for that
+     * so the live view matches what you'd see standing at the exit.
+     */
+    private static final float EYE_FORWARD_OFFSET = 5.0f;
     private static final int     MAX_RAY_DIST     = 48;
     private static final double  ENTITY_SCAN_RADIUS = 32.0;
 
@@ -272,10 +280,6 @@ public class LocalizedChunkCapture {
                                                       Map<BlockState, Integer> colorMap) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
-        double eyeX = eyePos.getX() + 0.5;
-        double eyeY = eyePos.getY() + 1.62;
-        double eyeZ = eyePos.getZ() + 0.5;
-
         double yawRad   = Math.toRadians(yawDeg);
         double pitchRad = Math.toRadians(pitchDeg);
 
@@ -283,6 +287,12 @@ public class LocalizedChunkCapture {
         double fwdX = -Math.sin(yawRad) * Math.cos(pitchRad);
         double fwdY = -Math.sin(pitchRad);
         double fwdZ =  Math.cos(yawRad) * Math.cos(pitchRad);
+
+        // Start at block center + eye height, then push forward along the view direction
+        // so the render origin matches where the player actually stands after crossing.
+        double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET;
+        double eyeY = eyePos.getY() + 1.62 + fwdY * EYE_FORWARD_OFFSET;
+        double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET;
 
         double rightX = Math.cos(yawRad);
         double rightZ = Math.sin(yawRad);
