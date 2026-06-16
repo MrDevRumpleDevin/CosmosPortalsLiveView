@@ -20,6 +20,8 @@ public class CosmosPortalsLiveView {
     public static IEventBus MOD_EVENT_BUS;
     
     public CosmosPortalsLiveView() {
+        ModLogger.logInfo("Initializing CosmosPortalsLiveView mod...");
+        
         // Get the mod event bus using the correct Forge 47.3.0 API
         MOD_EVENT_BUS = FMLJavaModLoadingContext.get().getModEventBus();
         
@@ -27,13 +29,17 @@ public class CosmosPortalsLiveView {
         
         MOD_EVENT_BUS.addListener(this::onFMLCommonSetup);
         MOD_EVENT_BUS.addListener(this::onFMLClientSetup);
+        
+        ModLogger.logInfo("CosmosPortalsLiveView mod initialized");
     }
     
     private void onFMLCommonSetup(final FMLCommonSetupEvent event) {
+        ModLogger.logInfo("FML Common Setup");
     }
     
     @OnlyIn(Dist.CLIENT)
     private void onFMLClientSetup(final FMLClientSetupEvent event) {
+        ModLogger.logInfo("FML Client Setup");
         PortalLiveViewClientSetup.setupClient();
     }
 }
