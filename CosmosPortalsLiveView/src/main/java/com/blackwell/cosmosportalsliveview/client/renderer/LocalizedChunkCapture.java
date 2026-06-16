@@ -18,8 +18,11 @@ import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -227,29 +230,35 @@ public class LocalizedChunkCapture {
                         .getParticleIcon();
             }
 
-            int rSum = 0, gSum = 0, bSum = 0, n = 0;
+            int rSum = 0, gSum = 0, bSum = 0, aSum = 0, n = 0;
             int spriteW = Math.max(1, sprite.contents().width());
             int spriteH = Math.max(1, sprite.contents().height());
 
-            int samples = Math.min(16, spriteW * spriteH);
-            for (int i = 0; i < samples; i++) {
-                int sx = (int)((i % 4) * (spriteW / 4.0));
-                int sy = (int)((i / 4) * (spriteH / 4.0));
-                // getPixelRGBA returns 0xAABBGGRR (NativeImage ABGR layout)
-                int px = sprite.contents().getOriginalImage().getPixelRGBA(
-                        Math.min(sx, spriteW - 1),
-                        Math.min(sy, spriteH - 1));
-                int pa = (px >> 24) & 0xFF;
-                if (pa < 10) continue;
-                int pr = (px      ) & 0xFF; // R in ABGR is byte 0
-                int pg = (px >>  8) & 0xFF;
-                int pb = (px >> 16) & 0xFF;
-                rSum += pr; gSum += pg; bSum += pb; n++;
+            // Sample up to 8×8 = 64 points for better color accuracy
+            int gridN = Math.min(8, spriteW);
+            int gridM = Math.min(8, spriteH);
+            for (int gi = 0; gi < gridN; gi++) {
+                for (int gj = 0; gj < gridM; gj++) {
+                    int sx = Math.min((int)((gi + 0.5) * spriteW / gridN), spriteW - 1);
+                    int sy = Math.min((int)((gj + 0.5) * spriteH / gridM), spriteH - 1);
+                    // getPixelRGBA returns NativeImage ABGR layout (A=byte3, B=byte2, G=byte1, R=byte0)
+                    int px = sprite.contents().getOriginalImage().getPixelRGBA(sx, sy);
+                    int pa = (px >> 24) & 0xFF;
+                    if (pa < 10) { aSum += pa; continue; } // count transparent pixels for avg alpha
+                    int pr = (px      ) & 0xFF; // R in ABGR is byte 0
+                    int pg = (px >>  8) & 0xFF;
+                    int pb = (px >> 16) & 0xFF;
+                    rSum += pr; gSum += pg; bSum += pb; aSum += pa; n++;
+                }
             }
 
+            int totalSamples = gridN * gridM;
             if (n == 0) return fallbackColor(state);
 
             int r = rSum / n, g = gSum / n, b = bSum / n;
+            // Average alpha across ALL samples (including transparent ones) so
+            // glass/doors get low alpha → the DDA transparency blend activates
+            int avgAlpha = aSum / totalSamples;
 
             // Apply biome/block tint
             if (tintIndex >= 0) {
@@ -261,7 +270,7 @@ public class LocalizedChunkCapture {
                 }
             }
 
-            return (0xFF << 24) | (r << 16) | (g << 8) | b;
+            return (avgAlpha << 24) | (r << 16) | (g << 8) | b;
 
         } catch (Exception e) {
             return fallbackColor(state);
@@ -482,11 +491,41 @@ public class LocalizedChunkCapture {
             BlockState state = level.getBlockState(bp);
 
             if (!state.isAir() && state.getRenderShape() != RenderShape.INVISIBLE) {
+                // Open doors: thin model that doesn't fill the block — skip so rays
+                // pass through them (open door = no visual obstruction like a wall)
+                if (state.getBlock() instanceof DoorBlock
+                        && state.hasProperty(BlockStateProperties.OPEN)
+                        && state.getValue(BlockStateProperties.OPEN)) {
+                    continue;
+                }
+
                 // Look up per-face pre-sampled color; fall back to hardcoded table
                 int[] faceColors = colorMap.get(state);
                 int baseColor = (faceColors != null)
                         ? faceColors[hitFace.ordinal()]
                         : fallbackColor(state);
+
+                // Transparent blocks: blend with sky/background instead of opaque hit.
+                // Alpha < 200 (out of 255) is treated as partially transparent.
+                int baseAlpha = (baseColor >> 24) & 0xFF;
+                if (baseAlpha < 200) {
+                    // Blend: keep tracing for sky color, then composite block over it
+                    int skyCol = computeSkyColor(dy);
+                    float blendT = 1.0f - (baseAlpha / 255.0f); // 0 = opaque, 1 = fully transparent
+                    // Slightly tint with block color, mostly show through
+                    int r = ((baseColor >> 16) & 0xFF);
+                    int g = ((baseColor >>  8) & 0xFF);
+                    int b = ( baseColor        & 0xFF);
+                    int sr = (skyCol >> 16) & 0xFF;
+                    int sg = (skyCol >>  8) & 0xFF;
+                    int sb =  skyCol        & 0xFF;
+                    // Additive tint: mix block color lightly into sky
+                    r = Math.min(255, (int)(r * (1f - blendT) + sr * blendT));
+                    g = Math.min(255, (int)(g * (1f - blendT) + sg * blendT));
+                    b = Math.min(255, (int)(b * (1f - blendT) + sb * blendT));
+                    hit[0] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                    return (float) t;
+                }
 
                 // Face-normal AO
                 float ao;
