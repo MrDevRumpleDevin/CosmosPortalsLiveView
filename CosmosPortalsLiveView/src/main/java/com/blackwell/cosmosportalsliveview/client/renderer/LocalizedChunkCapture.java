@@ -119,7 +119,7 @@ public class LocalizedChunkCapture {
         try {
             // ── Bind offscreen FBO ─────────────────────────────────────────────
             offscreenTarget.bindWrite(true);
-            offscreenTarget.clear(false, Minecraft.ON_OSX);
+            offscreenTarget.clear(false);
             GlStateManager._viewport(0, 0, resolution, resolution);
 
             // ── Move camera to destination ─────────────────────────────────────
@@ -260,8 +260,10 @@ public class LocalizedChunkCapture {
         }
 
         try {
-            // RenderTarget(width, height, useDepth, onOSX)
-            offscreenTarget = new RenderTarget(resolution, resolution, true, Minecraft.ON_OSX);
+            // RenderTarget is abstract in 1.20.1 with no abstract methods — subclass anonymously.
+            // RenderTarget(boolean useDepth) then resize via createBuffers(w, h, onOSX).
+            offscreenTarget = new RenderTarget(true) {};
+            offscreenTarget.createBuffers(resolution, resolution, Minecraft.ON_OSX);
             offscreenTarget.setClearColor(0f, 0f, 0f, 0f);
             offscreenResolution = resolution;
         } catch (Exception e) {
