@@ -246,6 +246,11 @@ public class LocalizedChunkCapture {
 
     // ── DDA ────────────────────────────────────────────────────────────────────
 
+    /** Alpha below this is treated as fully transparent (cutout miss — keep marching). */
+    private static final int CUTOUT_ALPHA_THRESHOLD = 16;
+    /** Alpha below this (but above cutout) is treated as translucent — blend with what's behind. */
+    private static final int TRANSLUCENT_ALPHA_THRESHOLD = 200;
+
     private static float ddaRay(Level level,
                                  double ox, double oy, double oz,
                                  double dx, double dy, double dz,
@@ -273,6 +278,10 @@ public class LocalizedChunkCapture {
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight();
 
+        // Accumulated translucent color (for glass stacking)
+        int accumR = 0, accumG = 0, accumB = 0;
+        float accumAlpha = 0f; // 0..1, how much of the final pixel is already determined
+
         while (t < MAX_RAY_DIST) {
             if (tMaxX < tMaxY && tMaxX < tMaxZ) { t = tMaxX; tMaxX += tDeltaX; bx += sx; }
             else if (tMaxY < tMaxZ)              { t = tMaxY; tMaxY += tDeltaY; by += sy; }
@@ -291,18 +300,10 @@ public class LocalizedChunkCapture {
 
             // Sample the exact pixel at the hit UV
             int baseColor = sampleHitPixel(qh, state, level, bp);
-
-            // Transparency blend (glass, ice, etc.)
             int alpha = (baseColor >> 24) & 0xFF;
-            if (alpha < 200) {
-                int sky = computeSkyColor(dy);
-                float bt = 1.0f - alpha / 255.0f;
-                hit[0] = (0xFF << 24)
-                       | (blend((baseColor >> 16) & 0xFF, (sky >> 16) & 0xFF, bt) << 16)
-                       | (blend((baseColor >>  8) & 0xFF, (sky >>  8) & 0xFF, bt) <<  8)
-                       |  blend( baseColor        & 0xFF,  sky        & 0xFF, bt);
-                return (float) qh.t;
-            }
+
+            // Cutout: fully transparent pixel -> skip this geometry, keep marching
+            if (alpha < CUTOUT_ALPHA_THRESHOLD) continue;
 
             // AO from face normal Y component
             float ao = (qh.ny > 0.5) ? AO_TOP : (qh.ny < -0.5) ? AO_BOTTOM : AO_SIDE;
@@ -310,11 +311,44 @@ public class LocalizedChunkCapture {
             float fogT = (float) Math.max(0.0, (qh.t - FOG_START) / (MAX_RAY_DIST - FOG_START));
             fogT = Math.min(1.0f, fogT * fogT);
 
-            hit[0] = lerpColor(shadeColor(baseColor, ao), computeSkyColor(dy), fogT);
-            return (float) qh.t;
+            int shadedColor = lerpColor(shadeColor(baseColor, ao), computeSkyColor(dy), fogT);
+            int sR = (shadedColor >> 16) & 0xFF;
+            int sG = (shadedColor >>  8) & 0xFF;
+            int sB =  shadedColor        & 0xFF;
+
+            if (alpha >= TRANSLUCENT_ALPHA_THRESHOLD) {
+                // Opaque hit: composite accumulated translucency over this surface
+                float remainWeight = 1.0f - accumAlpha;
+                int finalR = Math.min(255, (int)(accumR + remainWeight * sR));
+                int finalG = Math.min(255, (int)(accumG + remainWeight * sG));
+                int finalB = Math.min(255, (int)(accumB + remainWeight * sB));
+                hit[0] = (0xFF << 24) | (finalR << 16) | (finalG << 8) | finalB;
+                return (float) qh.t;
+            } else {
+                // Translucent hit (glass, ice): accumulate, keep marching for what's behind
+                float sA = alpha / 255.0f;
+                float layerContrib = sA * (1.0f - accumAlpha);
+                accumR = Math.min(255, (int)(accumR + layerContrib * sR));
+                accumG = Math.min(255, (int)(accumG + layerContrib * sG));
+                accumB = Math.min(255, (int)(accumB + layerContrib * sB));
+                accumAlpha = Math.min(1.0f, accumAlpha + layerContrib);
+                if (accumAlpha > 0.98f) {
+                    hit[0] = (0xFF << 24) | (accumR << 16) | (accumG << 8) | accumB;
+                    return (float) qh.t;
+                }
+            }
         }
 
-        hit[0] = computeSkyColor(dy);
+        // Ray escaped: composite accumulated translucency over sky
+        int skyColor = computeSkyColor(dy);
+        float remainWeight = 1.0f - accumAlpha;
+        int skyR = (skyColor >> 16) & 0xFF;
+        int skyG = (skyColor >>  8) & 0xFF;
+        int skyB =  skyColor        & 0xFF;
+        hit[0] = (0xFF << 24)
+               | (Math.min(255, (int)(accumR + remainWeight * skyR)) << 16)
+               | (Math.min(255, (int)(accumG + remainWeight * skyG)) <<  8)
+               |  Math.min(255, (int)(accumB + remainWeight * skyB));
         return MAX_RAY_DIST;
     }
 
