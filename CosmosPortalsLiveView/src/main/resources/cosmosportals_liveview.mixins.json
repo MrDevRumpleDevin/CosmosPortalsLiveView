@@ -3,6 +3,7 @@
   "minVersion": "0.8",
   "package": "com.blackwell.cosmosportalsliveview.mixin",
   "compatibilityLevel": "JAVA_8",
+  "refmap": "cosmosportals_liveview.refmap.json",
   "client": [
     "MixinGameRenderer"
   ],
