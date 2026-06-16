@@ -367,7 +367,7 @@ public class PortalRenderEventHandler {
         // in front of CosmosPortals' color layer). Negative = toward player based on the
         // previous test where +0.52 went away from the player.
         // The per-dock offset (cycled with sneak+right-click wand) is added on top.
-        final float FACE_OFFSET = -0.52f + LiveViewState.getOffset(dockPos);
+        final float FACE_OFFSET = 0.0f + LiveViewState.getOffset(dockPos);
 
         double camX = camera.getPosition().x;
         double camY = camera.getPosition().y;
