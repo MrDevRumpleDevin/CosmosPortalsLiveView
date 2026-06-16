@@ -21,6 +21,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
@@ -301,6 +302,8 @@ public class LocalizedChunkCapture {
 
             BlockState state = level.getBlockState(new BlockPos(bx, by, bz));
             if (state.isAir() || state.getRenderShape() == RenderShape.INVISIBLE) continue;
+            // ENTITYBLOCK_ANIMATED (beds, chests, signs, etc.) have no BakedModel quads —
+            // handled via VoxelShape fallback inside intersectBlockQuads.
 
             // Intersect ray against this block's actual quad geometry.
             // tEntry = how far along the ray we entered this cell.
@@ -356,6 +359,10 @@ public class LocalizedChunkCapture {
      * faces + unculled quads). Returns the closest hit inside [tEntry, tEntry+√3],
      * or null if the ray passes through without hitting any geometry.
      *
+     * For blocks with RenderShape.ENTITYBLOCK_ANIMATED (beds, chests, signs, etc.)
+     * BakedModel returns no quads — falls back to VoxelShape AABB intersection so
+     * these blocks are never invisible.
+     *
      * Vertex layout in BakedQuad.getVertices() (stride 8 ints per vertex):
      *   [0] x as float bits, [1] y as float bits, [2] z as float bits,
      *   [3] normal packed, [4] u as float bits, [5] v as float bits, [6-7] misc
@@ -377,10 +384,15 @@ public class LocalizedChunkCapture {
                 allQuads.addAll(model.getQuads(state, face, rand));
             }
         } catch (Exception e) {
-            return null;
+            // Model unavailable — try VoxelShape fallback
         }
 
-        if (allQuads.isEmpty()) return null;
+        // ENTITYBLOCK_ANIMATED blocks (beds, chests, signs, bells, lecterns…) expose
+        // no quads via BakedModel. Fall back to their VoxelShape collision boxes so
+        // they are never invisible in the live view.
+        if (allQuads.isEmpty()) {
+            return intersectVoxelShape(state, level, bp, ox, oy, oz, dx, dy, dz, tEntry);
+        }
 
         // Block-local ray origin: shift so block corner = (0,0,0)
         double lox = ox - bp.getX();
@@ -443,6 +455,83 @@ public class LocalizedChunkCapture {
 
         if (bestSprite == null) return null;
         return new QuadHit(bestT, bestNX, bestNY, bestNZ, bestSprite, bestTint);
+    }
+
+    /**
+     * Fallback for blocks with no BakedModel quads (ENTITYBLOCK_ANIMATED: beds, chests,
+     * signs, bells, lecterns, etc.). Ray-tests against the block's VoxelShape AABB boxes.
+     * Uses the particle icon for color — not per-face texture, but at least correct
+     * shape and color rather than invisible.
+     */
+    private static QuadHit intersectVoxelShape(BlockState state, Level level, BlockPos bp,
+                                                double ox, double oy, double oz,
+                                                double dx, double dy, double dz,
+                                                double tEntry) {
+        VoxelShape shape;
+        try {
+            // getShape gives the visual/collision outline; good enough for rendering
+            shape = state.getShape(level, bp);
+        } catch (Exception e) {
+            return null;
+        }
+
+        if (shape == null || shape.isEmpty()) return null;
+
+        // Block-local ray origin
+        double lox = ox - bp.getX();
+        double loy = oy - bp.getY();
+        double loz = oz - bp.getZ();
+
+        double bestT  = Double.MAX_VALUE;
+        double bestNX = 0, bestNY = 1, bestNZ = 0;
+
+        double tMin = Math.max(0.0, tEntry - 0.01);
+        double tMax = tEntry + 1.8;
+
+        for (AABB box : shape.toAabbs()) {
+            // Ray-AABB slab test
+            double txMin = (dx == 0) ? Double.NEGATIVE_INFINITY : (box.minX - lox) / dx;
+            double txMax = (dx == 0) ? Double.POSITIVE_INFINITY : (box.maxX - lox) / dx;
+            if (txMin > txMax) { double tmp = txMin; txMin = txMax; txMax = tmp; }
+
+            double tyMin = (dy == 0) ? Double.NEGATIVE_INFINITY : (box.minY - loy) / dy;
+            double tyMax = (dy == 0) ? Double.POSITIVE_INFINITY : (box.maxY - loy) / dy;
+            if (tyMin > tyMax) { double tmp = tyMin; tyMin = tyMax; tyMax = tmp; }
+
+            double tzMin = (dz == 0) ? Double.NEGATIVE_INFINITY : (box.minZ - loz) / dz;
+            double tzMax = (dz == 0) ? Double.POSITIVE_INFINITY : (box.maxZ - loz) / dz;
+            if (tzMin > tzMax) { double tmp = tzMin; tzMin = tzMax; tzMax = tmp; }
+
+            double tEnterBox = Math.max(Math.max(txMin, tyMin), tzMin);
+            double tExitBox  = Math.min(Math.min(txMax, tyMax), tzMax);
+
+            if (tEnterBox > tExitBox + 1e-8) continue; // miss
+            if (tExitBox  < tMin)            continue; // behind
+            if (tEnterBox > tMax)            continue; // too far
+
+            double tHit = (tEnterBox >= tMin) ? tEnterBox : tExitBox;
+            if (tHit < tMin || tHit > tMax)  continue;
+            if (tHit >= bestT)               continue;
+
+            bestT = tHit;
+
+            // Determine which face was hit by which slab was the tEnterBox constraint
+            if (tEnterBox == txMin)      { bestNX = -Math.signum(dx); bestNY = 0; bestNZ = 0; }
+            else if (tEnterBox == tyMin) { bestNX = 0; bestNY = -Math.signum(dy); bestNZ = 0; }
+            else                         { bestNX = 0; bestNY = 0; bestNZ = -Math.signum(dz); }
+        }
+
+        if (bestT == Double.MAX_VALUE) return null;
+
+        // Use particle icon for color (no per-face quad data available)
+        TextureAtlasSprite sprite = null;
+        try {
+            sprite = Minecraft.getInstance()
+                    .getModelManager().getBlockModelShaper()
+                    .getBlockModel(state).getParticleIcon();
+        } catch (Exception ignored) {}
+
+        return new QuadHit(bestT, bestNX, bestNY, bestNZ, sprite, -1);
     }
 
     /**
