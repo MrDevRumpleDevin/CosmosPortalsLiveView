@@ -113,8 +113,9 @@ public class LocalizedChunkCapture {
         // Parallax: lateral shift of the virtual camera at the destination.
         // parallaxOffsetRight/Up are in portal-local space and map directly to
         // the destination camera's right/up axes (same orientation as source portal).
-        final float parallaxRight = portalData.parallaxOffsetRight;
-        final float parallaxUp    = portalData.parallaxOffsetUp;
+        final float parallaxRight   = portalData.parallaxOffsetRight;
+        final float parallaxUp      = portalData.parallaxOffsetUp;
+        final float parallaxForward = portalData.parallaxOffsetForward;
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
@@ -122,7 +123,7 @@ public class LocalizedChunkCapture {
                 image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
-                                              parallaxRight, parallaxUp,
+                                              parallaxRight, parallaxUp, parallaxForward,
                                               entityDots);
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
@@ -173,7 +174,7 @@ public class LocalizedChunkCapture {
                                                       float yawDeg, float pitchDeg,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
-                                                      float parallaxRight, float parallaxUp,
+                                                      float parallaxRight, float parallaxUp, float parallaxForward,
                                                       List<EntityDot> entityDots) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
@@ -195,9 +196,7 @@ public class LocalizedChunkCapture {
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
 
-        // Apply parallax: shift virtual eye position laterally using the portal's
-        // right and up axes. parallaxRight/Up come from the player's offset at the
-        // source portal projected onto portal-local axes.
+        // Apply parallax lateral shift.
         // Clamp to portal half-size so extreme angles don't go wild.
         float clampedRight = Math.max(-portalHalfW, Math.min(portalHalfW, parallaxRight));
         float clampedUp    = Math.max(-portalHalfH, Math.min(portalHalfH, parallaxUp));
@@ -205,8 +204,14 @@ public class LocalizedChunkCapture {
         eyeY +=                         upY * clampedUp;
         eyeZ += rightZ * clampedRight + upZ * clampedUp;
 
-        double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
-        double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;
+        // Apply parallax depth: player distance from the portal face drives the effective
+        // screen distance — closer = tighter FOV (you're right at the window),
+        // farther = wider FOV (small window in the distance).
+        // Clamp to [0.5 .. 16] to avoid extreme values.
+        double screenDist = Math.max(0.5, Math.min(16.0, parallaxForward));
+
+        double halfFovW = portalHalfW / screenDist;
+        double halfFovH = portalHalfH / screenDist;
 
         float[] depthBuf = new float[resW * resH];
 

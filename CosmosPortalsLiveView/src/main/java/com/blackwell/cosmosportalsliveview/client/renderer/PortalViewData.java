@@ -45,8 +45,10 @@ public class PortalViewData {
      * right and up axes. Updated each render frame on the main thread.
      * Consumed by captureAsync to shift the virtual camera, producing parallax.
      */
-    public volatile float parallaxOffsetRight = 0f;
-    public volatile float parallaxOffsetUp    = 0f;
+    public volatile float parallaxOffsetRight   = 0f;
+    public volatile float parallaxOffsetUp      = 0f;
+    /** Distance along the portal face normal (positive = in front of portal). */
+    public volatile float parallaxOffsetForward = 2.0f; // default = VIRTUAL_SCREEN_DIST
 
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
