@@ -25,8 +25,6 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -37,35 +35,34 @@ import java.util.concurrent.Executors;
  *
  * Rendering pipeline:
  *  - Amanatides-Woo DDA walks the block grid
- *  - On each non-air cell, Möller–Trumbore ray-quad intersection tests the actual
- *    BakedModel geometry — slabs, stairs, doors, fences all have correct silhouettes
- *  - Hit quad's sprite is sampled for color; tint (grass/leaves/water) applied
+ *  - Möller–Trumbore ray-quad intersection against actual BakedModel geometry
+ *  - Barycentric UV interpolation → exact pixel sampled from the hit quad's sprite
+ *  - Tint (grass/leaves/water) applied per-pixel
+ *  - ENTITYBLOCK_ANIMATED fallback (beds, chests) via VoxelShape AABB + face-projected UV
  *  - Face-normal AO: top 100%, sides 78%, bottom 60%
- *  - Distance fog blends toward sky at range
- *  - 1× ray per pixel (SSAA disabled while geometry work is in progress)
- *
- * Threading: entity snapshot runs on main thread. All raycasting + model reads run
- * on CAPTURE_EXECUTOR — BakedModel/TextureAtlas are read-only after bake, safe.
+ *  - Distance fog blends toward sky
+ *  - 1× ray per pixel
  */
 @OnlyIn(Dist.CLIENT)
 public class LocalizedChunkCapture {
 
-    private static final float  VIRTUAL_SCREEN_DIST  = 2.0f;
-    private static final float  EYE_FORWARD_OFFSET   = -0.5f;
-    private static final int    MAX_RAY_DIST         = 48;
-    private static final double ENTITY_SCAN_RADIUS   = 32.0;
+    private static final float  VIRTUAL_SCREEN_DIST = 2.0f;
+    private static final float  EYE_FORWARD_OFFSET  = -0.5f;
+    private static final int    MAX_RAY_DIST        = 48;
+    private static final double ENTITY_SCAN_RADIUS  = 32.0;
 
-    /** Face AO multipliers */
     private static final float AO_TOP    = 1.00f;
     private static final float AO_SIDE   = 0.78f;
     private static final float AO_BOTTOM = 0.60f;
 
-    /** Distance fog: full color until FOG_START, then blends to sky */
     private static final float FOG_START = 20.0f;
 
     /**
-     * Quad vertex stride in the int[] returned by BakedQuad.getVertices().
-     * Layout per vertex: [x_float, y_float, z_float, normal_int, u_float, v_float, misc, misc]
+     * BakedQuad vertex stride (ints). Per vertex:
+     *   [0] x float, [1] y float, [2] z float,
+     *   [3] normal packed int,
+     *   [4] u float (atlas UV), [5] v float (atlas UV),
+     *   [6] AO/lightmap, [7] misc
      */
     private static final int VERTEX_STRIDE = 8;
 
@@ -103,17 +100,16 @@ public class LocalizedChunkCapture {
 
         portalData.setCaptureInFlight(true);
 
-        // Entity snapshot must run on main thread
         final List<EntityDot> entityDots = snapshotEntities(sampleLevel, portalData.destPos);
 
-        final Level    levelSnap  = sampleLevel;
-        final int      resWSnap   = resW;
-        final int      resHSnap   = resH;
-        final float    yaw        = portalData.destYaw;
-        final float    pitch      = portalData.destPitch;
-        final BlockPos destPos    = portalData.destPos;
-        final float    halfWSnap  = halfW;
-        final float    halfHSnap  = halfH;
+        final Level    levelSnap = sampleLevel;
+        final int      resWSnap  = resW;
+        final int      resHSnap  = resH;
+        final float    yaw       = portalData.destYaw;
+        final float    pitch     = portalData.destPitch;
+        final BlockPos destPos   = portalData.destPos;
+        final float    halfWSnap = halfW;
+        final float    halfHSnap = halfH;
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
@@ -188,7 +184,6 @@ public class LocalizedChunkCapture {
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
 
-        // up = right × fwd
         double upX = -rightZ * fwdY;
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
@@ -224,32 +219,23 @@ public class LocalizedChunkCapture {
         }
 
         // Entity dots
-        if (!entityDots.isEmpty()) {
-            for (EntityDot dot : entityDots) {
-                double dx = dot.x() - eyeX;
-                double dy = dot.y() - eyeY;
-                double dz = dot.z() - eyeZ;
-
-                double depth = dx * fwdX + dy * fwdY + dz * fwdZ;
-                if (depth < 0.5) continue;
-
-                double projX = dx * rightX              + dz * rightZ;
-                double projY = dx * upX + dy * upY + dz * upZ;
-
-                double ndcEX = projX / (depth * halfFovW);
-                double ndcEY = projY / (depth * halfFovH);
-
-                int screenX = (int)((ndcEX + 1.0) * 0.5 * resW);
-                int screenY = (int)((1.0 - ndcEY) * 0.5 * resH);
-
-                int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
-                for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
-                    for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
-                        int spx = screenX + dx2, spy = screenY + dy2;
-                        if (spx < 0 || spx >= resW || spy < 0 || spy >= resH) continue;
-                        if ((float) depth < depthBuf[spy * resW + spx] + 0.5f)
-                            image.setPixelRGBA(spx, spy, toABGR(dot.argbColor()));
-                    }
+        for (EntityDot dot : entityDots) {
+            double dx = dot.x() - eyeX;
+            double dy = dot.y() - eyeY;
+            double dz = dot.z() - eyeZ;
+            double depth = dx * fwdX + dy * fwdY + dz * fwdZ;
+            if (depth < 0.5) continue;
+            double projX = dx * rightX              + dz * rightZ;
+            double projY = dx * upX + dy * upY + dz * upZ;
+            int screenX = (int)((projX / (depth * halfFovW) + 1.0) * 0.5 * resW);
+            int screenY = (int)((1.0 - projY / (depth * halfFovH)) * 0.5 * resH);
+            int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
+            for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
+                for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
+                    int spx = screenX + dx2, spy = screenY + dy2;
+                    if (spx < 0 || spx >= resW || spy < 0 || spy >= resH) continue;
+                    if ((float) depth < depthBuf[spy * resW + spx] + 0.5f)
+                        image.setPixelRGBA(spx, spy, toABGR(dot.argbColor()));
                 }
             }
         }
@@ -258,7 +244,7 @@ public class LocalizedChunkCapture {
         return image;
     }
 
-    // ── Amanatides-Woo DDA + quad intersection ────────────────────────────────
+    // ── DDA ────────────────────────────────────────────────────────────────────
 
     private static float ddaRay(Level level,
                                  double ox, double oy, double oz,
@@ -272,75 +258,59 @@ public class LocalizedChunkCapture {
         int sy = dy >= 0 ? 1 : -1;
         int sz = dz >= 0 ? 1 : -1;
 
-        double tDeltaX = Math.abs(dx) < 1e-12 ? Double.MAX_VALUE : Math.abs(1.0 / dx);
-        double tDeltaY = Math.abs(dy) < 1e-12 ? Double.MAX_VALUE : Math.abs(1.0 / dy);
-        double tDeltaZ = Math.abs(dz) < 1e-12 ? Double.MAX_VALUE : Math.abs(1.0 / dz);
+        double tDeltaX = Math.abs(dx) < 1e-12 ? Double.MAX_VALUE : 1.0 / Math.abs(dx);
+        double tDeltaY = Math.abs(dy) < 1e-12 ? Double.MAX_VALUE : 1.0 / Math.abs(dy);
+        double tDeltaZ = Math.abs(dz) < 1e-12 ? Double.MAX_VALUE : 1.0 / Math.abs(dz);
 
         double tMaxX = Math.abs(dx) < 1e-12 ? Double.MAX_VALUE
-                : (dx > 0 ? (Math.floor(ox) + 1 - ox) : (ox - Math.floor(ox))) / Math.abs(dx);
+                : (dx > 0 ? Math.floor(ox) + 1 - ox : ox - Math.floor(ox)) / Math.abs(dx);
         double tMaxY = Math.abs(dy) < 1e-12 ? Double.MAX_VALUE
-                : (dy > 0 ? (Math.floor(oy) + 1 - oy) : (oy - Math.floor(oy))) / Math.abs(dy);
+                : (dy > 0 ? Math.floor(oy) + 1 - oy : oy - Math.floor(oy)) / Math.abs(dy);
         double tMaxZ = Math.abs(dz) < 1e-12 ? Double.MAX_VALUE
-                : (dz > 0 ? (Math.floor(oz) + 1 - oz) : (oz - Math.floor(oz))) / Math.abs(dz);
+                : (dz > 0 ? Math.floor(oz) + 1 - oz : oz - Math.floor(oz)) / Math.abs(dz);
 
         double t = 0.0;
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight();
 
         while (t < MAX_RAY_DIST) {
-            // Step to next cell boundary
-            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-                t = tMaxX; tMaxX += tDeltaX; bx += sx;
-            } else if (tMaxY < tMaxZ) {
-                t = tMaxY; tMaxY += tDeltaY; by += sy;
-            } else {
-                t = tMaxZ; tMaxZ += tDeltaZ; bz += sz;
-            }
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) { t = tMaxX; tMaxX += tDeltaX; bx += sx; }
+            else if (tMaxY < tMaxZ)              { t = tMaxY; tMaxY += tDeltaY; by += sy; }
+            else                                 { t = tMaxZ; tMaxZ += tDeltaZ; bz += sz; }
 
             if (t >= MAX_RAY_DIST) break;
             if (by < minY || by > maxY) break;
 
             BlockState state = level.getBlockState(new BlockPos(bx, by, bz));
             if (state.isAir() || state.getRenderShape() == RenderShape.INVISIBLE) continue;
-            // ENTITYBLOCK_ANIMATED (beds, chests, signs, etc.) have no BakedModel quads —
-            // handled via VoxelShape fallback inside intersectBlockQuads.
 
-            // Intersect ray against this block's actual quad geometry.
-            // tEntry = how far along the ray we entered this cell.
-            double tEntry = t;
-            QuadHit qh = intersectBlockQuads(state, level, new BlockPos(bx, by, bz),
-                                              ox, oy, oz, dx, dy, dz, tEntry);
-            if (qh == null) continue; // ray passed through geometry gap (open door, slab air half, etc.)
+            BlockPos bp = new BlockPos(bx, by, bz);
+            QuadHit qh = intersectBlockQuads(state, level, bp,
+                                              ox, oy, oz, dx, dy, dz, t);
+            if (qh == null) continue;
 
-            // Sample color from the hit quad's sprite
-            int baseColor = sampleSpriteColor(qh.sprite, qh.tintIndex, state, level,
-                                              new BlockPos(bx, by, bz));
+            // Sample the exact pixel at the hit UV
+            int baseColor = sampleHitPixel(qh, state, level, bp);
 
-            // Transparency: glass panes, ice, etc. — blend with sky
+            // Transparency blend (glass, ice, etc.)
             int alpha = (baseColor >> 24) & 0xFF;
             if (alpha < 200) {
-                int skyCol = computeSkyColor(dy);
-                float blendT = 1.0f - (alpha / 255.0f);
-                int r = blend((baseColor >> 16) & 0xFF, (skyCol >> 16) & 0xFF, blendT);
-                int g = blend((baseColor >>  8) & 0xFF, (skyCol >>  8) & 0xFF, blendT);
-                int b = blend( baseColor        & 0xFF,  skyCol        & 0xFF, blendT);
-                hit[0] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                int sky = computeSkyColor(dy);
+                float bt = 1.0f - alpha / 255.0f;
+                hit[0] = (0xFF << 24)
+                       | (blend((baseColor >> 16) & 0xFF, (sky >> 16) & 0xFF, bt) << 16)
+                       | (blend((baseColor >>  8) & 0xFF, (sky >>  8) & 0xFF, bt) <<  8)
+                       |  blend( baseColor        & 0xFF,  sky        & 0xFF, bt);
                 return (float) qh.t;
             }
 
-            // AO by face normal
-            float ao;
-            double ny = qh.ny;
-            if      (ny >  0.5) ao = AO_TOP;
-            else if (ny < -0.5) ao = AO_BOTTOM;
-            else                ao = AO_SIDE;
+            // AO from face normal Y component
+            float ao = (qh.ny > 0.5) ? AO_TOP : (qh.ny < -0.5) ? AO_BOTTOM : AO_SIDE;
 
-            // Fog
             float fogT = (float) Math.max(0.0, (qh.t - FOG_START) / (MAX_RAY_DIST - FOG_START));
             fogT = Math.min(1.0f, fogT * fogT);
 
-            int shaded = shadeColor(baseColor, ao);
-            hit[0] = lerpColor(shaded, computeSkyColor(dy), fogT);
+            hit[0] = lerpColor(shadeColor(baseColor, ao), computeSkyColor(dy), fogT);
             return (float) qh.t;
         }
 
@@ -348,25 +318,35 @@ public class LocalizedChunkCapture {
         return MAX_RAY_DIST;
     }
 
-    // ── Quad geometry intersection ─────────────────────────────────────────────
-
-    /** Result of a successful ray-quad intersection inside a block cell. */
-    private record QuadHit(double t, double nx, double ny, double nz,
-                            TextureAtlasSprite sprite, int tintIndex) {}
+    // ── Quad intersection ──────────────────────────────────────────────────────
 
     /**
-     * Tests the ray against every BakedQuad in the block's model (all 6 directional
-     * faces + unculled quads). Returns the closest hit inside [tEntry, tEntry+√3],
-     * or null if the ray passes through without hitting any geometry.
+     * Result of a ray-quad or ray-AABB hit.
      *
-     * For blocks with RenderShape.ENTITYBLOCK_ANIMATED (beds, chests, signs, etc.)
-     * BakedModel returns no quads — falls back to VoxelShape AABB intersection so
-     * these blocks are never invisible.
+     * For quad hits: sprite + atlas UVs (u0,v0)..(u3,v3) at the 4 quad vertices,
+     * plus barycentric coords (bary1, bary2) so we can interpolate to the exact hit UV.
+     * triIdx: 0 = triangle (v0,v1,v2), 1 = triangle (v0,v2,v3).
      *
-     * Vertex layout in BakedQuad.getVertices() (stride 8 ints per vertex):
-     *   [0] x as float bits, [1] y as float bits, [2] z as float bits,
-     *   [3] normal packed, [4] u as float bits, [5] v as float bits, [6-7] misc
+     * For VoxelShape hits: sprite only, hitU/hitV = face-projected UV (0..1).
+     * bary1=bary2=-1 signals "use hitU/hitV directly".
      */
+    private record QuadHit(
+            double t,
+            double nx, double ny, double nz,
+            TextureAtlasSprite sprite,
+            int tintIndex,
+            // Quad vertex atlas UVs  (only valid when bary1 >= 0)
+            float u0, float v0,
+            float u1, float v1,
+            float u2, float v2,
+            float u3, float v3,
+            // Barycentric coords at hit point inside the two-triangle quad
+            double bary1, double bary2,
+            int triIdx,
+            // Direct UV for VoxelShape fallback (bary1 < 0)
+            float hitU, float hitV
+    ) {}
+
     private static QuadHit intersectBlockQuads(BlockState state, Level level, BlockPos bp,
                                                 double ox, double oy, double oz,
                                                 double dx, double dy, double dz,
@@ -374,156 +354,181 @@ public class LocalizedChunkCapture {
         Minecraft mc = Minecraft.getInstance();
         RandomSource rand = RandomSource.create(42L);
 
-        // Collect all quads: unculled (null face) + each of 6 directional faces
         List<BakedQuad> allQuads = new ArrayList<>();
         try {
             var model = mc.getModelManager().getBlockModelShaper().getBlockModel(state);
-            // Unculled quads (most geometry is here for non-full-cube blocks)
             allQuads.addAll(model.getQuads(state, null, rand));
             for (Direction face : Direction.values()) {
                 allQuads.addAll(model.getQuads(state, face, rand));
             }
-        } catch (Exception e) {
-            // Model unavailable — try VoxelShape fallback
-        }
+        } catch (Exception ignored) {}
 
-        // ENTITYBLOCK_ANIMATED blocks (beds, chests, signs, bells, lecterns…) expose
-        // no quads via BakedModel. Fall back to their VoxelShape collision boxes so
-        // they are never invisible in the live view.
         if (allQuads.isEmpty()) {
             return intersectVoxelShape(state, level, bp, ox, oy, oz, dx, dy, dz, tEntry);
         }
-
-        // Block-local ray origin: shift so block corner = (0,0,0)
-        double lox = ox - bp.getX();
-        double loy = oy - bp.getY();
-        double loz = oz - bp.getZ();
-
-        double bestT  = Double.MAX_VALUE;
-        double bestNX = 0, bestNY = 1, bestNZ = 0;
-        TextureAtlasSprite bestSprite  = null;
-        int                bestTint    = -1;
-
-        // Search window: ray must hit within the cell's diagonal (max √3 ≈ 1.732)
-        double tMin = Math.max(0.0, tEntry - 0.01); // slight back-step for rays starting inside
-        double tMax = tEntry + 1.8;
-
-        for (BakedQuad quad : allQuads) {
-            int[] verts = quad.getVertices();
-            if (verts.length < 4 * VERTEX_STRIDE) continue;
-
-            // Unpack 4 vertices
-            float x0 = Float.intBitsToFloat(verts[0]);
-            float y0 = Float.intBitsToFloat(verts[1]);
-            float z0 = Float.intBitsToFloat(verts[2]);
-            float x1 = Float.intBitsToFloat(verts[VERTEX_STRIDE]);
-            float y1 = Float.intBitsToFloat(verts[VERTEX_STRIDE + 1]);
-            float z1 = Float.intBitsToFloat(verts[VERTEX_STRIDE + 2]);
-            float x2 = Float.intBitsToFloat(verts[2 * VERTEX_STRIDE]);
-            float y2 = Float.intBitsToFloat(verts[2 * VERTEX_STRIDE + 1]);
-            float z2 = Float.intBitsToFloat(verts[2 * VERTEX_STRIDE + 2]);
-            float x3 = Float.intBitsToFloat(verts[3 * VERTEX_STRIDE]);
-            float y3 = Float.intBitsToFloat(verts[3 * VERTEX_STRIDE + 1]);
-            float z3 = Float.intBitsToFloat(verts[3 * VERTEX_STRIDE + 2]);
-
-            // Test two triangles of the quad: (v0,v1,v2) and (v0,v2,v3)
-            double t1 = mollerTrumbore(lox, loy, loz, dx, dy, dz,
-                                        x0, y0, z0, x1, y1, z1, x2, y2, z2);
-            double t2 = mollerTrumbore(lox, loy, loz, dx, dy, dz,
-                                        x0, y0, z0, x2, y2, z2, x3, y3, z3);
-
-            for (double tHit : new double[]{t1, t2}) {
-                if (tHit < tMin || tHit > tMax) continue;
-                if (tHit < bestT) {
-                    bestT = tHit;
-                    // Compute face normal from edge vectors
-                    double e1x = x1 - x0, e1y = y1 - y0, e1z = z1 - z0;
-                    double e2x = x2 - x0, e2y = y2 - y0, e2z = z2 - z0;
-                    double nx = e1y * e2z - e1z * e2y;
-                    double ny = e1z * e2x - e1x * e2z;
-                    double nz = e1x * e2y - e1y * e2x;
-                    double nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
-                    if (nl > 1e-9) { nx /= nl; ny /= nl; nz /= nl; }
-                    // Flip normal toward ray origin
-                    if (nx * dx + ny * dy + nz * dz > 0) { nx = -nx; ny = -ny; nz = -nz; }
-                    bestNX = nx; bestNY = ny; bestNZ = nz;
-                    bestSprite = quad.getSprite();
-                    bestTint   = quad.isTinted() ? quad.getTintIndex() : -1;
-                }
-            }
-        }
-
-        if (bestSprite == null) return null;
-        return new QuadHit(bestT, bestNX, bestNY, bestNZ, bestSprite, bestTint);
-    }
-
-    /**
-     * Fallback for blocks with no BakedModel quads (ENTITYBLOCK_ANIMATED: beds, chests,
-     * signs, bells, lecterns, etc.). Ray-tests against the block's VoxelShape AABB boxes.
-     * Uses the particle icon for color — not per-face texture, but at least correct
-     * shape and color rather than invisible.
-     */
-    private static QuadHit intersectVoxelShape(BlockState state, Level level, BlockPos bp,
-                                                double ox, double oy, double oz,
-                                                double dx, double dy, double dz,
-                                                double tEntry) {
-        VoxelShape shape;
-        try {
-            // getShape gives the visual/collision outline; good enough for rendering
-            shape = state.getShape(level, bp);
-        } catch (Exception e) {
-            return null;
-        }
-
-        if (shape == null || shape.isEmpty()) return null;
 
         // Block-local ray origin
         double lox = ox - bp.getX();
         double loy = oy - bp.getY();
         double loz = oz - bp.getZ();
 
-        double bestT  = Double.MAX_VALUE;
-        double bestNX = 0, bestNY = 1, bestNZ = 0;
-
         double tMin = Math.max(0.0, tEntry - 0.01);
         double tMax = tEntry + 1.8;
 
-        for (AABB box : shape.toAabbs()) {
-            // Ray-AABB slab test
-            double txMin = (dx == 0) ? Double.NEGATIVE_INFINITY : (box.minX - lox) / dx;
-            double txMax = (dx == 0) ? Double.POSITIVE_INFINITY : (box.maxX - lox) / dx;
-            if (txMin > txMax) { double tmp = txMin; txMin = txMax; txMax = tmp; }
+        double bestT   = Double.MAX_VALUE;
+        double bestNX  = 0, bestNY = 1, bestNZ = 0;
+        double bestB1  = 0, bestB2 = 0;
+        int    bestTri = 0;
+        float  bu0 = 0, bv0 = 0, bu1 = 0, bv1 = 0, bu2 = 0, bv2 = 0, bu3 = 0, bv3 = 0;
+        TextureAtlasSprite bestSprite = null;
+        int    bestTint = -1;
 
-            double tyMin = (dy == 0) ? Double.NEGATIVE_INFINITY : (box.minY - loy) / dy;
-            double tyMax = (dy == 0) ? Double.POSITIVE_INFINITY : (box.maxY - loy) / dy;
-            if (tyMin > tyMax) { double tmp = tyMin; tyMin = tyMax; tyMax = tmp; }
+        for (BakedQuad quad : allQuads) {
+            int[] verts = quad.getVertices();
+            if (verts.length < 4 * VERTEX_STRIDE) continue;
 
-            double tzMin = (dz == 0) ? Double.NEGATIVE_INFINITY : (box.minZ - loz) / dz;
-            double tzMax = (dz == 0) ? Double.POSITIVE_INFINITY : (box.maxZ - loz) / dz;
-            if (tzMin > tzMax) { double tmp = tzMin; tzMin = tzMax; tzMax = tmp; }
+            // Unpack positions and atlas UVs for all 4 vertices
+            float x0 = Float.intBitsToFloat(verts[0]),  y0 = Float.intBitsToFloat(verts[1]),  z0 = Float.intBitsToFloat(verts[2]);
+            float x1 = Float.intBitsToFloat(verts[8]),  y1 = Float.intBitsToFloat(verts[9]),  z1 = Float.intBitsToFloat(verts[10]);
+            float x2 = Float.intBitsToFloat(verts[16]), y2 = Float.intBitsToFloat(verts[17]), z2 = Float.intBitsToFloat(verts[18]);
+            float x3 = Float.intBitsToFloat(verts[24]), y3 = Float.intBitsToFloat(verts[25]), z3 = Float.intBitsToFloat(verts[26]);
 
-            double tEnterBox = Math.max(Math.max(txMin, tyMin), tzMin);
-            double tExitBox  = Math.min(Math.min(txMax, tyMax), tzMax);
+            float qu0 = Float.intBitsToFloat(verts[4]),  qv0 = Float.intBitsToFloat(verts[5]);
+            float qu1 = Float.intBitsToFloat(verts[12]), qv1 = Float.intBitsToFloat(verts[13]);
+            float qu2 = Float.intBitsToFloat(verts[20]), qv2 = Float.intBitsToFloat(verts[21]);
+            float qu3 = Float.intBitsToFloat(verts[28]), qv3 = Float.intBitsToFloat(verts[29]);
 
-            if (tEnterBox > tExitBox + 1e-8) continue; // miss
-            if (tExitBox  < tMin)            continue; // behind
-            if (tEnterBox > tMax)            continue; // too far
-
-            double tHit = (tEnterBox >= tMin) ? tEnterBox : tExitBox;
-            if (tHit < tMin || tHit > tMax)  continue;
-            if (tHit >= bestT)               continue;
-
-            bestT = tHit;
-
-            // Determine which face was hit by which slab was the tEnterBox constraint
-            if (tEnterBox == txMin)      { bestNX = -Math.signum(dx); bestNY = 0; bestNZ = 0; }
-            else if (tEnterBox == tyMin) { bestNX = 0; bestNY = -Math.signum(dy); bestNZ = 0; }
-            else                         { bestNX = 0; bestNY = 0; bestNZ = -Math.signum(dz); }
+            // Triangle 0: v0,v1,v2
+            double[] bary = new double[2];
+            double t0 = mollerTrumbore(lox, loy, loz, dx, dy, dz,
+                                        x0, y0, z0, x1, y1, z1, x2, y2, z2, bary);
+            if (t0 >= tMin && t0 <= tMax && t0 < bestT) {
+                bestT = t0; bestB1 = bary[0]; bestB2 = bary[1]; bestTri = 0;
+                setNormal(x0,y0,z0, x1,y1,z1, x2,y2,z2, dx,dy,dz, new double[]{0,0,0}); // computed below
+                bestSprite = quad.getSprite();
+                bestTint = quad.isTinted() ? quad.getTintIndex() : -1;
+                bu0=qu0; bv0=qv0; bu1=qu1; bv1=qv1; bu2=qu2; bv2=qv2; bu3=qu3; bv3=qv3;
+                double[] n = computeNormal(x0,y0,z0, x1,y1,z1, x2,y2,z2, dx,dy,dz);
+                bestNX=n[0]; bestNY=n[1]; bestNZ=n[2];
+            }
+            // Triangle 1: v0,v2,v3
+            double t1 = mollerTrumbore(lox, loy, loz, dx, dy, dz,
+                                        x0, y0, z0, x2, y2, z2, x3, y3, z3, bary);
+            if (t1 >= tMin && t1 <= tMax && t1 < bestT) {
+                bestT = t1; bestB1 = bary[0]; bestB2 = bary[1]; bestTri = 1;
+                bestSprite = quad.getSprite();
+                bestTint = quad.isTinted() ? quad.getTintIndex() : -1;
+                bu0=qu0; bv0=qv0; bu1=qu1; bv1=qv1; bu2=qu2; bv2=qv2; bu3=qu3; bv3=qv3;
+                double[] n = computeNormal(x0,y0,z0, x2,y2,z2, x3,y3,z3, dx,dy,dz);
+                bestNX=n[0]; bestNY=n[1]; bestNZ=n[2];
+            }
         }
 
-        if (bestT == Double.MAX_VALUE) return null;
+        if (bestSprite == null) return null;
+        return new QuadHit(bestT, bestNX, bestNY, bestNZ, bestSprite, bestTint,
+                           bu0, bv0, bu1, bv1, bu2, bv2, bu3, bv3,
+                           bestB1, bestB2, bestTri,
+                           0f, 0f);
+    }
 
-        // Use particle icon for color (no per-face quad data available)
+    /** Compute and flip face normal toward ray origin. */
+    private static double[] computeNormal(double ax, double ay, double az,
+                                           double bx, double by, double bz,
+                                           double cx, double cy, double cz,
+                                           double rdx, double rdy, double rdz) {
+        double e1x = bx-ax, e1y = by-ay, e1z = bz-az;
+        double e2x = cx-ax, e2y = cy-ay, e2z = cz-az;
+        double nx = e1y*e2z - e1z*e2y;
+        double ny = e1z*e2x - e1x*e2z;
+        double nz = e1x*e2y - e1y*e2x;
+        double nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
+        if (nl > 1e-9) { nx/=nl; ny/=nl; nz/=nl; }
+        if (nx*rdx + ny*rdy + nz*rdz > 0) { nx=-nx; ny=-ny; nz=-nz; }
+        return new double[]{nx, ny, nz};
+    }
+
+    // Unused overload kept for clarity
+    private static void setNormal(double ax, double ay, double az,
+                                   double bx, double by, double bz,
+                                   double cx, double cy, double cz,
+                                   double rdx, double rdy, double rdz,
+                                   double[] out) {}
+
+    // ── VoxelShape fallback (ENTITYBLOCK_ANIMATED) ─────────────────────────────
+
+    private static QuadHit intersectVoxelShape(BlockState state, Level level, BlockPos bp,
+                                                double ox, double oy, double oz,
+                                                double dx, double dy, double dz,
+                                                double tEntry) {
+        VoxelShape shape;
+        try { shape = state.getShape(level, bp); }
+        catch (Exception e) { return null; }
+        if (shape == null || shape.isEmpty()) return null;
+
+        double lox = ox - bp.getX(), loy = oy - bp.getY(), loz = oz - bp.getZ();
+        double tMin = Math.max(0.0, tEntry - 0.01);
+        double tMax = tEntry + 1.8;
+
+        double bestT = Double.MAX_VALUE;
+        double bestNX = 0, bestNY = 1, bestNZ = 0;
+        double bestHitLX = 0, bestHitLY = 0, bestHitLZ = 0;
+        AABB bestBox = null;
+
+        for (AABB box : shape.toAabbs()) {
+            double txn = dx == 0 ? Double.NEGATIVE_INFINITY : (box.minX - lox) / dx;
+            double txx = dx == 0 ? Double.POSITIVE_INFINITY : (box.maxX - lox) / dx;
+            if (txn > txx) { double tmp=txn; txn=txx; txx=tmp; }
+
+            double tyn = dy == 0 ? Double.NEGATIVE_INFINITY : (box.minY - loy) / dy;
+            double tyx = dy == 0 ? Double.POSITIVE_INFINITY : (box.maxY - loy) / dy;
+            if (tyn > tyx) { double tmp=tyn; tyn=tyx; tyx=tmp; }
+
+            double tzn = dz == 0 ? Double.NEGATIVE_INFINITY : (box.minZ - loz) / dz;
+            double tzx = dz == 0 ? Double.POSITIVE_INFINITY : (box.maxZ - loz) / dz;
+            if (tzn > tzx) { double tmp=tzn; tzn=tzx; tzx=tmp; }
+
+            double tEnter = Math.max(Math.max(txn, tyn), tzn);
+            double tExit  = Math.min(Math.min(txx, tyx), tzx);
+            if (tEnter > tExit + 1e-8 || tExit < tMin || tEnter > tMax) continue;
+
+            double tHit = (tEnter >= tMin) ? tEnter : tExit;
+            if (tHit < tMin || tHit > tMax || tHit >= bestT) continue;
+
+            bestT   = tHit;
+            bestBox = box;
+            if      (tEnter == txn) { bestNX = -Math.signum(dx); bestNY = 0; bestNZ = 0; }
+            else if (tEnter == tyn) { bestNX = 0; bestNY = -Math.signum(dy); bestNZ = 0; }
+            else                    { bestNX = 0; bestNY = 0; bestNZ = -Math.signum(dz); }
+
+            // Hit point in block-local coords
+            bestHitLX = lox + dx * bestT;
+            bestHitLY = loy + dy * bestT;
+            bestHitLZ = loz + dz * bestT;
+        }
+
+        if (bestBox == null) return null;
+
+        // Project hit point onto the hit face to get a 0..1 UV
+        float hitU, hitV;
+        if (Math.abs(bestNX) > 0.5) {
+            // X-facing face → UV from Z,Y
+            hitU = (float)((bestHitLZ - bestBox.minZ) / Math.max(1e-5, bestBox.maxZ - bestBox.minZ));
+            hitV = (float)(1.0 - (bestHitLY - bestBox.minY) / Math.max(1e-5, bestBox.maxY - bestBox.minY));
+            if (bestNX > 0) hitU = 1f - hitU; // flip for +X face
+        } else if (Math.abs(bestNY) > 0.5) {
+            // Y-facing face → UV from X,Z
+            hitU = (float)((bestHitLX - bestBox.minX) / Math.max(1e-5, bestBox.maxX - bestBox.minX));
+            hitV = (float)((bestHitLZ - bestBox.minZ) / Math.max(1e-5, bestBox.maxZ - bestBox.minZ));
+            if (bestNY < 0) hitV = 1f - hitV; // flip for bottom face
+        } else {
+            // Z-facing face → UV from X,Y
+            hitU = (float)((bestHitLX - bestBox.minX) / Math.max(1e-5, bestBox.maxX - bestBox.minX));
+            hitV = (float)(1.0 - (bestHitLY - bestBox.minY) / Math.max(1e-5, bestBox.maxY - bestBox.minY));
+            if (bestNZ < 0) hitU = 1f - hitU; // flip for -Z face
+        }
+        hitU = Math.max(0f, Math.min(1f, hitU));
+        hitV = Math.max(0f, Math.min(1f, hitV));
+
         TextureAtlasSprite sprite = null;
         try {
             sprite = Minecraft.getInstance()
@@ -531,104 +536,137 @@ public class LocalizedChunkCapture {
                     .getBlockModel(state).getParticleIcon();
         } catch (Exception ignored) {}
 
-        return new QuadHit(bestT, bestNX, bestNY, bestNZ, sprite, -1);
+        // bary1 = -1 signals "use hitU/hitV directly"
+        return new QuadHit(bestT, bestNX, bestNY, bestNZ, sprite, -1,
+                           0,0, 0,0, 0,0, 0,0,
+                           -1, 0, 0,
+                           hitU, hitV);
     }
 
+    // ── Möller–Trumbore ────────────────────────────────────────────────────────
+
     /**
-     * Möller–Trumbore ray-triangle intersection.
-     * Returns t along the ray, or -1 if no intersection.
-     * All coordinates in block-local space (origin at block corner).
+     * Returns t at intersection, or -1. Writes barycentric (u,v) into bary[0..1].
+     * Coordinates in block-local space.
      */
     private static double mollerTrumbore(double ox, double oy, double oz,
                                           double dx, double dy, double dz,
                                           double ax, double ay, double az,
                                           double bx, double by, double bz,
-                                          double cx, double cy, double cz) {
+                                          double cx, double cy, double cz,
+                                          double[] bary) {
         final double EPS = 1e-8;
+        double e1x = bx-ax, e1y = by-ay, e1z = bz-az;
+        double e2x = cx-ax, e2y = cy-ay, e2z = cz-az;
 
-        double e1x = bx - ax, e1y = by - ay, e1z = bz - az;
-        double e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+        double hx = dy*e2z - dz*e2y;
+        double hy = dz*e2x - dx*e2z;
+        double hz = dx*e2y - dy*e2x;
 
-        // h = d × e2
-        double hx = dy * e2z - dz * e2y;
-        double hy = dz * e2x - dx * e2z;
-        double hz = dx * e2y - dy * e2x;
-
-        double det = e1x * hx + e1y * hy + e1z * hz;
-        if (Math.abs(det) < EPS) return -1.0; // parallel
-
+        double det = e1x*hx + e1y*hy + e1z*hz;
+        if (Math.abs(det) < EPS) return -1.0;
         double invDet = 1.0 / det;
 
-        // s = o - a
-        double sx = ox - ax, sy = oy - ay, sz = oz - az;
-
-        double u = (sx * hx + sy * hy + sz * hz) * invDet;
+        double sx = ox-ax, sy = oy-ay, sz = oz-az;
+        double u = (sx*hx + sy*hy + sz*hz) * invDet;
         if (u < 0.0 || u > 1.0) return -1.0;
 
-        // q = s × e1
-        double qx = sy * e1z - sz * e1y;
-        double qy = sz * e1x - sx * e1z;
-        double qz = sx * e1y - sy * e1x;
+        double qx = sy*e1z - sz*e1y;
+        double qy = sz*e1x - sx*e1z;
+        double qz = sx*e1y - sy*e1x;
+        double v = (dx*qx + dy*qy + dz*qz) * invDet;
+        if (v < 0.0 || u+v > 1.0) return -1.0;
 
-        double v = (dx * qx + dy * qy + dz * qz) * invDet;
-        if (v < 0.0 || u + v > 1.0) return -1.0;
+        double t = (e2x*qx + e2y*qy + e2z*qz) * invDet;
+        if (t <= EPS) return -1.0;
 
-        double t = (e2x * qx + e2y * qy + e2z * qz) * invDet;
-        return t > EPS ? t : -1.0;
+        bary[0] = u;
+        bary[1] = v;
+        return t;
     }
 
-    // ── Sprite color sampling ──────────────────────────────────────────────────
+    // ── Pixel sampling ─────────────────────────────────────────────────────────
 
     /**
-     * Samples the average color from a sprite, applying block tint (grass/leaves/water).
-     * Uses an 8×8 grid sample for good accuracy.
+     * Given a QuadHit, computes the exact pixel color at the hit point.
+     *
+     * For quad hits: interpolates atlas UVs using barycentric coords, maps to
+     * sprite-local pixel coords, reads the pixel directly.
+     *
+     * For VoxelShape hits (bary1 < 0): uses the face-projected hitU/hitV directly.
      */
-    private static int sampleSpriteColor(TextureAtlasSprite sprite, int tintIndex,
-                                          BlockState state, Level level, BlockPos pos) {
+    private static int sampleHitPixel(QuadHit qh, BlockState state, Level level, BlockPos pos) {
+        TextureAtlasSprite sprite = qh.sprite();
         if (sprite == null) return fallbackColor(state);
+
         try {
-            int spriteW = Math.max(1, sprite.contents().width());
-            int spriteH = Math.max(1, sprite.contents().height());
+            NativeImage img = sprite.contents().getOriginalImage();
+            if (img == null) return fallbackColor(state);
 
-            int gridN = Math.min(8, spriteW);
-            int gridM = Math.min(8, spriteH);
+            int imgW = img.getWidth();
+            int imgH = img.getHeight();
+            if (imgW <= 0 || imgH <= 0) return fallbackColor(state);
 
-            int rSum = 0, gSum = 0, bSum = 0, aSum = 0, n = 0;
-            int total = gridN * gridM;
+            float atlasU, atlasV;
 
-            for (int gi = 0; gi < gridN; gi++) {
-                for (int gj = 0; gj < gridM; gj++) {
-                    int sx = Math.min((int)((gi + 0.5) * spriteW / gridN), spriteW - 1);
-                    int sy = Math.min((int)((gj + 0.5) * spriteH / gridM), spriteH - 1);
-                    // NativeImage pixel layout: ABGR (A=bits31-24, B=bits23-16, G=bits15-8, R=bits7-0)
-                    int px = sprite.contents().getOriginalImage().getPixelRGBA(sx, sy);
-                    int pa = (px >> 24) & 0xFF;
-                    aSum += pa;
-                    if (pa < 10) continue;
-                    rSum += (px      ) & 0xFF;  // R
-                    gSum += (px >>  8) & 0xFF;  // G
-                    bSum += (px >> 16) & 0xFF;  // B
-                    n++;
+            if (qh.bary1() < 0) {
+                // VoxelShape fallback: use face-projected UV mapped into sprite bounds
+                atlasU = sprite.getU0() + qh.hitU() * (sprite.getU1() - sprite.getU0());
+                atlasV = sprite.getV0() + qh.hitV() * (sprite.getV1() - sprite.getV0());
+            } else {
+                // Barycentric interpolation of atlas UVs across the hit triangle
+                double w0 = 1.0 - qh.bary1() - qh.bary2();
+                double w1 = qh.bary1();
+                double w2 = qh.bary2();
+
+                if (qh.triIdx() == 0) {
+                    // Triangle (v0, v1, v2)
+                    atlasU = (float)(w0 * qh.u0() + w1 * qh.u1() + w2 * qh.u2());
+                    atlasV = (float)(w0 * qh.v0() + w1 * qh.v1() + w2 * qh.v2());
+                } else {
+                    // Triangle (v0, v2, v3)
+                    atlasU = (float)(w0 * qh.u0() + w1 * qh.u2() + w2 * qh.u3());
+                    atlasV = (float)(w0 * qh.v0() + w1 * qh.v2() + w2 * qh.v3());
                 }
             }
 
-            if (n == 0) return fallbackColor(state);
+            // Atlas UV → sprite-local pixel coords
+            // The sprite occupies [u0..u1] x [v0..v1] within the atlas (0..1 range).
+            float su0 = sprite.getU0(), su1 = sprite.getU1();
+            float sv0 = sprite.getV0(), sv1 = sprite.getV1();
 
-            int r = rSum / n, g = gSum / n, b = bSum / n;
-            int avgAlpha = aSum / total; // averaged over all samples including transparent
+            float spriteRelU = (atlasU - su0) / Math.max(1e-6f, su1 - su0);
+            float spriteRelV = (atlasV - sv0) / Math.max(1e-6f, sv1 - sv0);
 
-            // Apply biome tint (grass, leaves, water, etc.)
-            if (tintIndex >= 0) {
-                Minecraft mc = Minecraft.getInstance();
-                int tint = mc.getBlockColors().getColor(state, level, pos, tintIndex);
+            // Sprite height may be taller than wide for animated sprites (frames stacked).
+            // Use only the first frame: frame height = width pixels.
+            int frameH = sprite.contents().width(); // square frame assumption
+            spriteRelU = Math.max(0f, Math.min(1f, spriteRelU));
+            spriteRelV = Math.max(0f, Math.min(1f, spriteRelV));
+
+            int px = Math.min((int)(spriteRelU * imgW), imgW - 1);
+            int py = Math.min((int)(spriteRelV * frameH), frameH - 1);
+
+            // NativeImage ABGR layout: A=bits31-24, B=bits23-16, G=bits15-8, R=bits7-0
+            int raw = img.getPixelRGBA(px, py);
+            int a = (raw >> 24) & 0xFF;
+            int r = (raw      ) & 0xFF;
+            int g = (raw >>  8) & 0xFF;
+            int b = (raw >> 16) & 0xFF;
+
+            // Apply biome tint
+            if (qh.tintIndex() >= 0) {
+                int tint = Minecraft.getInstance()
+                        .getBlockColors().getColor(state, level, pos, qh.tintIndex());
                 if (tint != -1) {
-                    r = (r * ((tint >> 16) & 0xFF)) / 255;
-                    g = (g * ((tint >>  8) & 0xFF)) / 255;
-                    b = (b * ( tint        & 0xFF)) / 255;
+                    r = r * ((tint >> 16) & 0xFF) / 255;
+                    g = g * ((tint >>  8) & 0xFF) / 255;
+                    b = b * ( tint        & 0xFF)  / 255;
                 }
             }
 
-            return (avgAlpha << 24) | (r << 16) | (g << 8) | b;
+            return (a << 24) | (r << 16) | (g << 8) | b;
+
         } catch (Exception e) {
             return fallbackColor(state);
         }
@@ -638,11 +676,9 @@ public class LocalizedChunkCapture {
 
     private static int computeSkyColor(double rdY) {
         float t = (float) Math.max(0.0, Math.min(1.0, rdY));
-        int hr = 180, hg = 210, hb = 230;
-        int zr =  20, zg =  60, zb = 160;
-        int r = (int)(hr + t * (zr - hr));
-        int g = (int)(hg + t * (zg - hg));
-        int b = (int)(hb + t * (zb - hb));
+        int r = (int)(180 + t * (20  - 180));
+        int g = (int)(210 + t * (60  - 210));
+        int b = (int)(230 + t * (160 - 230));
         if (rdY < 0) {
             float u = (float) Math.min(1.0, -rdY * 2.0);
             r = (int)(r + u * (100 - r));
@@ -659,39 +695,33 @@ public class LocalizedChunkCapture {
     }
 
     private static int shadeColor(int argb, float shade) {
-        int a = (argb >> 24) & 0xFF;
-        int r = Math.min(255, (int)(((argb >> 16) & 0xFF) * shade));
-        int g = Math.min(255, (int)(((argb >>  8) & 0xFF) * shade));
-        int b = Math.min(255, (int)(( argb        & 0xFF) * shade));
-        return (a << 24) | (r << 16) | (g << 8) | b;
+        return ((argb >> 24) & 0xFF) << 24
+             | Math.min(255, (int)(((argb >> 16) & 0xFF) * shade)) << 16
+             | Math.min(255, (int)(((argb >>  8) & 0xFF) * shade)) <<  8
+             | Math.min(255, (int)(( argb        & 0xFF) * shade));
     }
 
     private static int lerpColor(int a, int b, float t) {
-        int ar = (a >> 16) & 0xFF, ag = (a >>  8) & 0xFF, ab =  a        & 0xFF;
-        int br = (b >> 16) & 0xFF, bg = (b >>  8) & 0xFF, bb =  b        & 0xFF;
-        int r  = (int)(ar + t * (br - ar));
-        int g  = (int)(ag + t * (bg - ag));
-        int bl = (int)(ab + t * (bb - ab));
-        return (0xFF << 24) | (r << 16) | (g << 8) | bl;
+        return (0xFF << 24)
+             | (int)((( a >> 16) & 0xFF) + t * (((b >> 16) & 0xFF) - ((a >> 16) & 0xFF))) << 16
+             | (int)((( a >>  8) & 0xFF) + t * (((b >>  8) & 0xFF) - ((a >>  8) & 0xFF))) <<  8
+             | (int)(( a        & 0xFF)  + t * (( b        & 0xFF)  - ( a        & 0xFF)));
     }
 
-    /** 0xAARRGGBB → 0xAABBGGRR (NativeImage stores pixels ABGR in memory). */
     private static int toABGR(int argb) {
-        int a = (argb >> 24) & 0xFF;
-        int r = (argb >> 16) & 0xFF;
-        int g = (argb >>  8) & 0xFF;
-        int b =  argb        & 0xFF;
-        return (a << 24) | (b << 16) | (g << 8) | r;
+        return ((argb >> 24) & 0xFF) << 24
+             | ( argb        & 0xFF) << 16
+             | ((argb >>  8) & 0xFF) <<  8
+             | ((argb >> 16) & 0xFF);
     }
 
-    private static void flipVertical(NativeImage image, int width, int height) {
-        for (int y = 0; y < height / 2; y++) {
-            int mirrorY = height - 1 - y;
-            for (int x = 0; x < width; x++) {
-                int top    = image.getPixelRGBA(x, y);
-                int bottom = image.getPixelRGBA(x, mirrorY);
-                image.setPixelRGBA(x, y,       bottom);
-                image.setPixelRGBA(x, mirrorY, top);
+    private static void flipVertical(NativeImage img, int w, int h) {
+        for (int y = 0; y < h / 2; y++) {
+            int my = h - 1 - y;
+            for (int x = 0; x < w; x++) {
+                int top = img.getPixelRGBA(x, y);
+                img.setPixelRGBA(x, y,  img.getPixelRGBA(x, my));
+                img.setPixelRGBA(x, my, top);
             }
         }
     }
@@ -703,25 +733,25 @@ public class LocalizedChunkCapture {
         int r = 110, g = 110, b = 110;
         try {
             if      (state.is(Blocks.GRASS_BLOCK))                                    { r= 95; g=159; b= 53; }
-            else if (state.is(Blocks.DIRT) || state.is(Blocks.ROOTED_DIRT))           { r=139; g=101; b= 68; }
+            else if (state.is(Blocks.DIRT)||state.is(Blocks.ROOTED_DIRT))             { r=139; g=101; b= 68; }
             else if (state.is(Blocks.STONE))                                          { r=128; g=128; b=128; }
             else if (state.is(Blocks.COBBLESTONE)||state.is(Blocks.MOSSY_COBBLESTONE)){ r=108; g=108; b=108; }
-            else if (state.is(Blocks.OAK_LOG)   ||state.is(Blocks.BIRCH_LOG)
-                  || state.is(Blocks.SPRUCE_LOG) ||state.is(Blocks.JUNGLE_LOG)
-                  || state.is(Blocks.ACACIA_LOG) ||state.is(Blocks.DARK_OAK_LOG))     { r=101; g= 77; b= 47; }
+            else if (state.is(Blocks.OAK_LOG)||state.is(Blocks.BIRCH_LOG)
+                  || state.is(Blocks.SPRUCE_LOG)||state.is(Blocks.JUNGLE_LOG)
+                  || state.is(Blocks.ACACIA_LOG)||state.is(Blocks.DARK_OAK_LOG))       { r=101; g= 77; b= 47; }
             else if (state.is(Blocks.OAK_LEAVES)||state.is(Blocks.BIRCH_LEAVES)
                   || state.is(Blocks.SPRUCE_LEAVES)||state.is(Blocks.JUNGLE_LEAVES)
-                  || state.is(Blocks.ACACIA_LEAVES)||state.is(Blocks.DARK_OAK_LEAVES)){ r= 59; g=101; b= 36; }
+                  || state.is(Blocks.ACACIA_LEAVES)||state.is(Blocks.DARK_OAK_LEAVES)) { r= 59; g=101; b= 36; }
             else if (state.is(Blocks.WATER))                                          { r=  0; g=100; b=200; }
-            else if (state.is(Blocks.SAND)||state.is(Blocks.SANDSTONE))              { r=238; g=203; b=139; }
-            else if (state.is(Blocks.SNOW)||state.is(Blocks.SNOW_BLOCK))             { r=245; g=245; b=245; }
+            else if (state.is(Blocks.SAND)||state.is(Blocks.SANDSTONE))               { r=238; g=203; b=139; }
+            else if (state.is(Blocks.SNOW)||state.is(Blocks.SNOW_BLOCK))              { r=245; g=245; b=245; }
             else if (state.is(Blocks.NETHERRACK))                                     { r=114; g= 22; b= 22; }
             else if (state.is(Blocks.SOUL_SAND)||state.is(Blocks.SOUL_SOIL))          { r= 75; g= 61; b= 50; }
             else if (state.is(Blocks.END_STONE)||state.is(Blocks.END_STONE_BRICKS))   { r=220; g=213; b=150; }
             else if (state.is(Blocks.BEDROCK))                                         { r= 50; g= 50; b= 50; }
             else if (state.is(Blocks.GRAVEL))                                          { r=147; g=139; b=131; }
             else if (state.is(Blocks.DEEPSLATE)||state.is(Blocks.COBBLED_DEEPSLATE))  { r= 70; g= 68; b= 80; }
-            else if (state.is(Blocks.OAK_PLANKS) ||state.is(Blocks.SPRUCE_PLANKS)
+            else if (state.is(Blocks.OAK_PLANKS)||state.is(Blocks.SPRUCE_PLANKS)
                   || state.is(Blocks.BIRCH_PLANKS)||state.is(Blocks.JUNGLE_PLANKS))   { r=180; g=130; b= 70; }
             else if (state.is(Blocks.GLASS)||state.is(Blocks.GLASS_PANE))             { r=200; g=230; b=240; }
             else if (state.is(Blocks.LAVA))                                            { r=220; g= 90; b= 10; }
