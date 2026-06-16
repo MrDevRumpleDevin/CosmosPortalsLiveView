@@ -29,6 +29,8 @@ public class PortalViewData {
 
     private DynamicTexture liveViewTexture;
     private long lastCaptureTime;
+    /** Incremented each time a new texture is set, so ResourceLocation keys stay unique. */
+    private volatile int textureVersion = 0;
 
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
@@ -67,8 +69,13 @@ public class PortalViewData {
             this.liveViewTexture.close();
         }
         this.liveViewTexture = texture;
+        this.textureVersion++;
         this.lastCaptureTime = System.currentTimeMillis();
         this.needsUpdate = false;
+    }
+
+    public int getTextureVersion() {
+        return textureVersion;
     }
 
     public void cleanup() {

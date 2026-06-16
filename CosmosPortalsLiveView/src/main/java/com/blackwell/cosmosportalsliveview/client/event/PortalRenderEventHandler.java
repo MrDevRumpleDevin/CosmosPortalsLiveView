@@ -137,8 +137,9 @@ public class PortalRenderEventHandler {
             DynamicTexture texture = data.getTexture();
             if (texture == null || texture.getPixels() == null) continue;
 
+            // Include version in key so resolution changes force a new GL texture object.
             ResourceLocation texLoc = minecraft.getTextureManager().register(
-                    "cosmosportals_liveview/portal_" + data.portalPos.asLong(),
+                    "cosmosportals_liveview/portal_" + data.portalPos.asLong() + "_v" + data.getTextureVersion(),
                     texture
             );
 
