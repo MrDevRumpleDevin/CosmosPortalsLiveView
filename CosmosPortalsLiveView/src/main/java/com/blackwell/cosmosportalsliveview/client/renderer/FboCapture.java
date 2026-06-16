@@ -7,6 +7,7 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexSorting;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.DynamicTexture;
@@ -16,9 +17,13 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import org.joml.Matrix4f;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL13;
+import org.lwjgl.opengl.GL14;
+import org.lwjgl.opengl.GL20;
+import org.lwjgl.opengl.GL30;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,7 +33,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * after the main frame is fully drawn — so we never interrupt the normal render
  * pipeline and never conflict with Valkyrien Skies.
  *
- * RenderTarget is abstract in 1.20.1. We create a concrete anonymous subclass
+ * GL STATE CONTRACT
+ * -----------------
+ * renderLevel() leaves behind bound shaders, texture units, blend state, depth
+ * state, and framebuffer bindings that differ from what MC expects when it
+ * continues drawing the GUI / inventory after our hook. We save every piece of
+ * GL state we touch and restore it unconditionally (even on exception) via a
+ * try/finally block so the main frame is never corrupted.
+ *
+ * RenderTarget is abstract in 1.20.1 — we create a concrete anonymous subclass
  * that simply calls createBuffers() to set up the FBO.
  */
 @OnlyIn(Dist.CLIENT)
@@ -56,9 +69,9 @@ public class FboCapture {
         Level level = mc.level;
         if (level == null || mc.player == null) return;
 
-        long nowMs      = System.currentTimeMillis();
-        long intervalMs = PortalLiveViewConfig.CAPTURE_INTERVAL_MS.get();
-        int  resolution = Math.max(64, PortalLiveViewConfig.CAPTURE_RESOLUTION.get());
+        long nowMs       = System.currentTimeMillis();
+        long intervalMs  = PortalLiveViewConfig.CAPTURE_INTERVAL_MS.get();
+        int  resolution  = Math.max(64, PortalLiveViewConfig.CAPTURE_RESOLUTION.get());
         int  maxPerFrame = PortalLiveViewConfig.PORTALS_PER_FRAME.get();
 
         int captured = 0;
@@ -81,7 +94,7 @@ public class FboCapture {
             BlockPos dockPos = PortalRenderEventHandler.findDockPos(level, data.portalPos);
             if (dockPos == null || !LiveViewState.isEnabled(dockPos)) continue;
 
-            // Proximity cull — 64 block radius, same as render handler
+            // Proximity cull — 64 block radius
             Vec3 playerPos = mc.player.position();
             BlockPos pp = data.portalPos;
             double dx = pp.getX() + 0.5 - playerPos.x;
@@ -115,52 +128,128 @@ public class FboCapture {
                 return existing;
             }
             if (existing != null) existing.destroyBuffers();
-            // RenderTarget is abstract — create concrete anonymous subclass
             RenderTarget fresh = new RenderTarget(true) {};
             fresh.createBuffers(resolution, resolution, Minecraft.ON_OSX);
             fresh.setClearColor(0f, 0f, 0f, 1f);
             return fresh;
         });
 
-        // ── Save state ─────────────────────────────────────────────────────────
-        RenderTarget mainFbo = mc.getMainRenderTarget();
+        // ── Snapshot ALL GL state we will touch ───────────────────────────────
+        // Framebuffer
+        int prevDrawFbo  = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        int prevReadFbo  = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
+
+        // Viewport
+        int[] prevViewport = new int[4];
+        GL11.glGetIntegerv(GL11.GL_VIEWPORT, prevViewport);
+
+        // Active texture unit
+        int prevActiveTexUnit = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
+
+        // Texture bound on unit 0 (the one renderLevel hammers)
+        GL13.glActiveTexture(GL13.GL_TEXTURE0);
+        int prevTex0 = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+
+        // Texture bound on unit 2 (lightmap)
+        GL13.glActiveTexture(GL13.GL_TEXTURE0 + 2);
+        int prevTex2 = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+
+        // Restore active unit to what it was
+        GL13.glActiveTexture(prevActiveTexUnit);
+
+        // Shader program
+        int prevShader = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
+
+        // Depth
+        boolean prevDepthTest  = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
+        int     prevDepthFunc  = GL11.glGetInteger(GL11.GL_DEPTH_FUNC);
+        boolean prevDepthWrite = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+
+        // Blend
+        boolean prevBlend     = GL11.glIsEnabled(GL11.GL_BLEND);
+        int     prevBlendSrc  = GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA);
+        int     prevBlendDst  = GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA);
+
+        // Cull
+        boolean prevCull     = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        int     prevCullFace = GL11.glGetInteger(GL11.GL_CULL_FACE_MODE);
+
+        // Projection matrix (RenderSystem-level, not raw GL)
+        // We capture it by re-fetching from gameRenderer after our pass
+        double fovDeg = mc.options.fov().get();
+        Matrix4f captureProj = mc.gameRenderer.getProjectionMatrix(fovDeg);
 
         // ── Build virtual camera ────────────────────────────────────────────────
-        // Camera.setup() needs a real entity — but we only need position + rotation.
-        // We position the eye slightly above destPos (player eye height) and look
-        // in the direction stored in PortalViewData (destYaw / destPitch).
         Camera virtualCam = new Camera();
         Vec3 eye = Vec3.atCenterOf(data.destPos)
                 .add(0, mc.player.getEyeHeight(), 0);
         setCameraTransform(virtualCam, eye, data.destYaw, data.destPitch);
 
-        // ── Set projection ─────────────────────────────────────────────────────
-        // square FBO: aspect ratio = 1.0, so we use 90° horizontal FOV
-        double fovDeg = mc.options.fov().get();
-        Matrix4f proj = mc.gameRenderer.getProjectionMatrix(fovDeg);
-        RenderSystem.setProjectionMatrix(proj,
-                com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
+        // ── Render into FBO ────────────────────────────────────────────────────
+        try {
+            // Square FBO: aspect = 1.0 so 90° looks reasonable; keep player's FOV
+            RenderSystem.setProjectionMatrix(captureProj, VertexSorting.DISTANCE_TO_ORIGIN);
 
-        // ── Bind FBO and render ────────────────────────────────────────────────
-        fbo.clear(Minecraft.ON_OSX);
-        fbo.bindWrite(true);
+            fbo.clear(Minecraft.ON_OSX);
+            fbo.bindWrite(true);
 
-        mc.levelRenderer.renderLevel(new PoseStack(), partialTick, 0L, false,
-                virtualCam, mc.gameRenderer, mc.gameRenderer.lightTexture(), proj);
+            mc.levelRenderer.renderLevel(
+                    new PoseStack(), partialTick, 0L, false,
+                    virtualCam, mc.gameRenderer,
+                    mc.gameRenderer.lightTexture(), captureProj);
 
-        // ── Read pixels ────────────────────────────────────────────────────────
+        } finally {
+            // ── Unconditional full GL state restore ───────────────────────────
+
+            // Framebuffer — restore both read and draw
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, prevReadFbo);
+
+            // Viewport
+            GL11.glViewport(prevViewport[0], prevViewport[1],
+                            prevViewport[2], prevViewport[3]);
+
+            // Shader
+            GL20.glUseProgram(prevShader);
+
+            // Texture units
+            GL13.glActiveTexture(GL13.GL_TEXTURE0);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevTex0);
+            GL13.glActiveTexture(GL13.GL_TEXTURE0 + 2);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevTex2);
+            GL13.glActiveTexture(prevActiveTexUnit);
+
+            // Depth
+            if (prevDepthTest) GL11.glEnable(GL11.GL_DEPTH_TEST);
+            else               GL11.glDisable(GL11.GL_DEPTH_TEST);
+            GL11.glDepthFunc(prevDepthFunc);
+            GL11.glDepthMask(prevDepthWrite);
+
+            // Blend
+            if (prevBlend) GL11.glEnable(GL11.GL_BLEND);
+            else           GL11.glDisable(GL11.GL_BLEND);
+            GL11.glBlendFunc(prevBlendSrc, prevBlendDst);
+
+            // Cull
+            if (prevCull) GL11.glEnable(GL11.GL_CULL_FACE);
+            else          GL11.glDisable(GL11.GL_CULL_FACE);
+            GL11.glCullFace(prevCullFace);
+
+            // Projection matrix — restore to main frame projection
+            Matrix4f mainProj = mc.gameRenderer.getProjectionMatrix(fovDeg);
+            RenderSystem.setProjectionMatrix(mainProj, VertexSorting.DISTANCE_TO_ORIGIN);
+
+            // Rebind main render target so MC can continue drawing GUI on top
+            mc.getMainRenderTarget().bindWrite(true);
+        }
+
+        // ── Read pixels and upload texture ────────────────────────────────────
+        // Only do this after full state restore — texture read doesn't need FBO bound
         NativeImage img = new NativeImage(NativeImage.Format.RGBA, resolution, resolution, false);
         RenderSystem.bindTexture(fbo.getColorTextureId());
         img.downloadTexture(0, false);
         img.flipY();
 
-        // ── Restore main FBO and projection ───────────────────────────────────
-        mainFbo.bindWrite(true);
-        Matrix4f mainProj = mc.gameRenderer.getProjectionMatrix(fovDeg);
-        RenderSystem.setProjectionMatrix(mainProj,
-                com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
-
-        // ── Upload texture on render thread (we are already on it) ────────────
         DynamicTexture tex = new DynamicTexture(img);
         tex.upload();
         data.setTexture(tex);
@@ -168,10 +257,6 @@ public class FboCapture {
 
     // ── Camera positioning ─────────────────────────────────────────────────────
 
-    /**
-     * Sets Camera position and rotation via reflection.
-     * Official mapping field names (1.20.1): initialized, position, xRot, yRot.
-     */
     private static void setCameraTransform(Camera cam, Vec3 pos,
                                             float yaw, float pitch) throws Exception {
         if (!reflectionResolved) resolveReflection();
@@ -207,7 +292,6 @@ public class FboCapture {
 
     // ── Cleanup ────────────────────────────────────────────────────────────────
 
-    /** Called when leaving a world — release all FBO GL resources. */
     public static void cleanup() {
         fboCache.forEach((k, fbo) -> {
             try { fbo.destroyBuffers(); } catch (Exception ignored) {}
@@ -215,9 +299,9 @@ public class FboCapture {
         fboCache.clear();
         lastCaptureMs.clear();
         reflectionResolved = false;
-        camPositionField = null;
-        camXRotField     = null;
-        camYRotField     = null;
+        camPositionField    = null;
+        camXRotField        = null;
+        camYRotField        = null;
         camInitializedField = null;
     }
 }
