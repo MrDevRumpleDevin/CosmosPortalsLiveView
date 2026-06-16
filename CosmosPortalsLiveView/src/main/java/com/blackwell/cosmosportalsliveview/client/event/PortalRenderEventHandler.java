@@ -346,13 +346,25 @@ public class PortalRenderEventHandler {
             // More unique X values → portal spans X → face normal ±Z (axis=X)
             isXAxis = uniqueX > uniqueZ;
         } else {
-            // Ambiguous — fall back to blockstate
+            // Ambiguous (single-block-wide portal) — read blockstate "axis" property by name.
+            // BlockStateProperties.AXIS is Minecraft's own instance; CosmosPortals registers
+            // its own EnumProperty with the same name but a different object, so hasProperty()
+            // returns false even though the property exists. Look it up by name instead.
             BlockState portalState = level.getBlockState(data.portalPos);
             isXAxis = false;
             try {
-                if (portalState.hasProperty(BlockStateProperties.AXIS)) {
-                    net.minecraft.core.Direction.Axis axis = portalState.getValue(BlockStateProperties.AXIS);
-                    isXAxis = (axis == net.minecraft.core.Direction.Axis.X);
+                for (net.minecraft.world.level.block.state.properties.Property<?> prop
+                        : portalState.getProperties()) {
+                    if (prop.getName().equals("axis")) {
+                        Object val = portalState.getValue(prop);
+                        if (val instanceof net.minecraft.core.Direction.Axis a) {
+                            isXAxis = (a == net.minecraft.core.Direction.Axis.X);
+                        } else {
+                            // value is a string in some mod versions
+                            isXAxis = val.toString().equalsIgnoreCase("x");
+                        }
+                        break;
+                    }
                 }
             } catch (Exception ignored) {}
         }
