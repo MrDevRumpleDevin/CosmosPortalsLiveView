@@ -1,5 +1,6 @@
 package com.blackwell.cosmosportalsliveview;
 
+import com.blackwell.cosmosportalsliveview.registry.ModItems;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.ModLoadingContext;
@@ -22,6 +23,9 @@ public class CosmosPortalsLiveView {
         MOD_EVENT_BUS = FMLJavaModLoadingContext.get().getModEventBus();
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, PortalLiveViewConfig.SPEC, "cosmosportals-liveview-client.toml");
+
+        // Register items
+        ModItems.ITEMS.register(MOD_EVENT_BUS);
 
         MOD_EVENT_BUS.addListener(this::onFMLCommonSetup);
         MOD_EVENT_BUS.addListener(this::onFMLClientSetup);
