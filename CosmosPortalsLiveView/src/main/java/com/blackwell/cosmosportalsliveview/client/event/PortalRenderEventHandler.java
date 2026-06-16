@@ -324,27 +324,18 @@ public class PortalRenderEventHandler {
             maxZ = Math.max(maxZ, bp.getZ());
         }
 
-        // Determine portal orientation from bounding box spans — more reliable than
-        // reading the blockstate AXIS property (avoids any property-lookup silent failures).
-        // axis=X portal: blocks span along X (maxX-minX > maxZ-minZ), face normal ±Z.
-        // axis=Z portal: blocks span along Z (maxZ-minZ > maxX-minX), face normal ±X.
-        // For a 1-block-wide portal both spans may be equal — fall back to blockstate.
-        boolean isXAxis;
-        int spanX = maxX - minX;
-        int spanZ = maxZ - minZ;
-        if (spanX != spanZ) {
-            isXAxis = (spanX > spanZ);
-        } else {
-            // Spans equal (single column or square) — read blockstate as tiebreaker
-            BlockState portalState = level.getBlockState(data.portalPos);
-            isXAxis = false;
-            try {
-                if (portalState.hasProperty(BlockStateProperties.AXIS)) {
-                    net.minecraft.core.Direction.Axis axis = portalState.getValue(BlockStateProperties.AXIS);
-                    isXAxis = (axis == net.minecraft.core.Direction.Axis.X);
-                }
-            } catch (Exception ignored) {}
-        }
+        // Determine portal orientation from the blockstate AXIS property on the portal block.
+        BlockState portalState = level.getBlockState(data.portalPos);
+        boolean isXAxis = false;
+        try {
+            if (portalState.hasProperty(BlockStateProperties.AXIS)) {
+                net.minecraft.core.Direction.Axis axis = portalState.getValue(BlockStateProperties.AXIS);
+                isXAxis = (axis == net.minecraft.core.Direction.Axis.X);
+            }
+        } catch (Exception ignored) {}
+        // Fallback: if blockstate read failed or both spans are zero, infer from bounding box.
+        // axis=X spans in X (face normal ±Z); axis=Z spans in Z (face normal ±X).
+        if (!isXAxis && (maxX - minX) > (maxZ - minZ)) isXAxis = true;
 
         double centerX = (minX + maxX) / 2.0 + 0.5;
         double centerY = (minY + maxY) / 2.0 + 0.5;
@@ -390,25 +381,21 @@ public class PortalRenderEventHandler {
             consumer.vertex(matrix,  halfW,  halfH, -fz).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
         } else {
             // ── AXIS=Z: portal plane is ZY, face normal is ±X ──────────────────
-            // Horizontal span runs along Z.  Player looks ±X to see the portal.
-            // Raycaster right-vector is ±Z when player faces ±X (yaw=90°/270°).
-            // When facing west (yaw=90°): rightZ=+1 → image left = -Z.
-            //   So U=0 → z=-halfW,  U=1 → z=+halfW.
+            // Horizontal span runs along Z. Player looks ±X to see the portal.
+            // U=0 → +Z side, U=1 → -Z side (matches working commit 25d5433).
             float halfW = (maxZ - minZ) / 2.0f + 0.5f;
             float fx    = FACE_OFFSET;
 
-            // Front face (viewer on +X side, looking west toward -X)
-            // Image left = -Z, so BL at z=-halfW gets U=0.
-            consumer.vertex(matrix,  fx, -halfH, -halfW).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  fx, -halfH,  halfW).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  fx,  halfH,  halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  fx,  halfH, -halfW).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            // Back face (viewer on -X side, looking east toward +X)
-            // Mirror: image left = +Z, so BL at z=+halfW gets U=0.
-            consumer.vertex(matrix, -fx, -halfH,  halfW).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -fx, -halfH, -halfW).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -fx,  halfH, -halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -fx,  halfH,  halfW).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            // Front face (+X side)
+            consumer.vertex(matrix,  fx, -halfH,  halfW).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  fx, -halfH, -halfW).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  fx,  halfH, -halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  fx,  halfH,  halfW).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            // Back face (-X side) — mirror U
+            consumer.vertex(matrix, -fx, -halfH, -halfW).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -fx, -halfH,  halfW).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -fx,  halfH,  halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -fx,  halfH, -halfW).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
         }
 
         poseStack.popPose();

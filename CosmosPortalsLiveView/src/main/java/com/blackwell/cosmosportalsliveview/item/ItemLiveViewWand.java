@@ -69,11 +69,9 @@ public class ItemLiveViewWand extends Item {
                     true
             );
 
-            // Debug: print raw destPos, raw getYaw/getPitch, and the swapped values
-            // used by PortalViewData (i.e., what the raycaster actually uses).
+            // Debug: print destPos, yaw/pitch, bbox spans, axis blockstate
             try {
-                BlockEntity dockBe = level.getBlockEntity(dockPos);
-                // Find the portal BE for this dock to read raw destInfo
+                // Find a portal BE in this frame
                 BlockEntityPortal portalBe = null;
                 outer:
                 for (BlockPos fp : findConnectedPortalBlocks(level, clickedPos, 64)) {
@@ -85,30 +83,37 @@ public class ItemLiveViewWand extends Item {
                 }
                 if (portalBe != null) {
                     BlockPos rawDest = portalBe.getDestPos();
-                    float rawGetYaw   = portalBe.destInfo.getYaw();   // contains actual PITCH
-                    float rawGetPitch = portalBe.destInfo.getPitch(); // contains actual YAW
-                    // After the swap fix: destYaw=getPitch(), destPitch=getYaw()
-                    float usedYaw   = rawGetPitch; // what raycaster uses as yaw
-                    float usedPitch = rawGetYaw;   // what raycaster uses as pitch
+                    float rawGetYaw   = portalBe.destInfo.getYaw();
+                    float rawGetPitch = portalBe.destInfo.getPitch();
 
-                    // Look up from PortalViewData for the actual used values
                     PortalViewData pvd = PortalLiveViewManager.getActivePortals().get(clickedPos);
 
+                    // Compute bbox spans same way renderPortalFrame does
+                    java.util.Set<BlockPos> frame2 = findConnectedPortalBlocks(level, clickedPos, 64);
+                    int minX=Integer.MAX_VALUE,minY=Integer.MAX_VALUE,minZ=Integer.MAX_VALUE;
+                    int maxX=Integer.MIN_VALUE,maxY=Integer.MIN_VALUE,maxZ=Integer.MIN_VALUE;
+                    for (BlockPos bp : frame2) {
+                        minX=Math.min(minX,bp.getX()); maxX=Math.max(maxX,bp.getX());
+                        minY=Math.min(minY,bp.getY()); maxY=Math.max(maxY,bp.getY());
+                        minZ=Math.min(minZ,bp.getZ()); maxZ=Math.max(maxZ,bp.getZ());
+                    }
+                    net.minecraft.world.level.block.state.BlockState pState = level.getBlockState(clickedPos);
+                    String axisVal = "unknown";
+                    try { axisVal = pState.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.AXIS).getName(); } catch(Exception ignored2){}
+
                     player.sendSystemMessage(Component.literal(
-                        String.format("[LiveView DEBUG] destPos=%s  dim=%s",
-                            rawDest, portalBe.destDimension)
+                        String.format("[LiveView DEBUG] destPos=%s  dim=%s", rawDest, portalBe.destDimension)
                     ).withStyle(ChatFormatting.AQUA));
                     player.sendSystemMessage(Component.literal(
-                        String.format("[LiveView DEBUG] raw getYaw()=%.1f  raw getPitch()=%.1f",
-                            rawGetYaw, rawGetPitch)
-                    ).withStyle(ChatFormatting.GRAY));
-                    player.sendSystemMessage(Component.literal(
-                        String.format("[LiveView DEBUG] used yaw=%.1f  used pitch=%.1f  (after swap fix)",
-                            usedYaw, usedPitch)
+                        String.format("[LiveView DEBUG] yaw=%.1f  pitch=%.1f", rawGetYaw, rawGetPitch)
                     ).withStyle(ChatFormatting.GREEN));
+                    player.sendSystemMessage(Component.literal(
+                        String.format("[LiveView DEBUG] bbox spanX=%d spanZ=%d  blockstate axis=%s  frameBlocks=%d",
+                            maxX-minX, maxZ-minZ, axisVal, frame2.size())
+                    ).withStyle(ChatFormatting.YELLOW));
                     if (pvd != null) {
                         player.sendSystemMessage(Component.literal(
-                            String.format("[LiveView DEBUG] PortalViewData: destYaw=%.1f  destPitch=%.1f",
+                            String.format("[LiveView DEBUG] PVD: destYaw=%.1f  destPitch=%.1f",
                                 pvd.destYaw, pvd.destPitch)
                         ).withStyle(ChatFormatting.YELLOW));
                     }
