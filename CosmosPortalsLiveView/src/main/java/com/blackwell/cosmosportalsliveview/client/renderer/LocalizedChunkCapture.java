@@ -50,7 +50,13 @@ import java.util.concurrent.Executors;
 @OnlyIn(Dist.CLIENT)
 public class LocalizedChunkCapture {
 
-    private static final float   FOV_DEGREES      = 70.0f;
+    /**
+     * "Virtual screen distance" in blocks — the assumed distance between the viewer
+     * and the portal plane when computing the window-effect FOV.
+     * halfFovTan = portalHalfW / VIRTUAL_SCREEN_DIST → 1-block portal at 2 blocks away
+     * subtends ~26°, 3-block portal ~56°.  Tune this to taste.
+     */
+    private static final float VIRTUAL_SCREEN_DIST = 2.0f;
     private static final int     MAX_RAY_DIST     = 48;
     private static final double  ENTITY_SCAN_RADIUS = 32.0;
 
@@ -87,8 +93,22 @@ public class LocalizedChunkCapture {
         Level sampleLevel = resolveSampleLevel(portalData.destDimension, level);
         if (sampleLevel == null) return;
 
-        int resolution = PortalLiveViewConfig.CAPTURE_RESOLUTION.get();
-        resolution = Math.max(64, Math.min(resolution, 512));
+        int baseRes = PortalLiveViewConfig.CAPTURE_RESOLUTION.get();
+        baseRes = Math.max(64, Math.min(baseRes, 512));
+
+        // Scale image resolution to match portal aspect ratio so pixels aren't stretched.
+        // Width drives the base resolution; height scales proportionally.
+        float halfW = Math.max(0.5f, portalData.portalHalfW);
+        float halfH = Math.max(0.5f, portalData.portalHalfH);
+        float aspect = halfW / halfH; // >1 wide, <1 tall
+        int resW, resH;
+        if (aspect >= 1.0f) {
+            resW = baseRes;
+            resH = Math.max(16, Math.min(baseRes, (int)(baseRes / aspect)));
+        } else {
+            resH = baseRes;
+            resW = Math.max(16, Math.min(baseRes, (int)(baseRes * aspect)));
+        }
 
         portalData.setCaptureInFlight(true);
 
@@ -97,15 +117,20 @@ public class LocalizedChunkCapture {
         final Map<BlockState, Integer> colorMap = snapshotBlockColors(sampleLevel, portalData.destPos);
 
         final Level    levelSnap = sampleLevel;
-        final int      resSnap   = resolution;
+        final int      resWSnap  = resW;
+        final int      resHSnap  = resH;
         final float    yaw       = portalData.destYaw;
         final float    pitch     = portalData.destPitch;
         final BlockPos destPos   = portalData.destPos;
+        final float    halfWSnap = halfW;
+        final float    halfHSnap = halfH;
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
             try {
-                image = renderPerspectiveView(levelSnap, destPos, yaw, pitch, resSnap,
+                image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
+                                              resWSnap, resHSnap,
+                                              halfWSnap, halfHSnap,
                                               entityDots, colorMap);
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
@@ -241,10 +266,11 @@ public class LocalizedChunkCapture {
 
     private static NativeImage renderPerspectiveView(Level level, BlockPos eyePos,
                                                       float yawDeg, float pitchDeg,
-                                                      int resolution,
+                                                      int resW, int resH,
+                                                      float portalHalfW, float portalHalfH,
                                                       List<EntityDot> entityDots,
                                                       Map<BlockState, Integer> colorMap) {
-        NativeImage image = new NativeImage(NativeImage.Format.RGBA, resolution, resolution, false);
+        NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
         double eyeX = eyePos.getX() + 0.5;
         double eyeY = eyePos.getY() + 1.62;
@@ -267,28 +293,34 @@ public class LocalizedChunkCapture {
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
 
-        double halfFov = Math.tan(Math.toRadians(FOV_DEGREES / 2.0));
-        double pixStep = 2.0 / resolution; // NDC size of one pixel
+        // Window-effect FOV: the portal acts like a window at VIRTUAL_SCREEN_DIST blocks away.
+        // halfFovH/W = portalHalf / VIRTUAL_SCREEN_DIST.  Each NDC unit maps to this many
+        // world-space units, so a larger portal reveals more of the scene.
+        double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
+        double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;
 
-        float[] depthBuf = new float[resolution * resolution];
+        double pixStepX = 2.0 / resW;
+        double pixStepY = 2.0 / resH;
+
+        float[] depthBuf = new float[resW * resH];
 
         // ── 4× SSAA block raycasting ──────────────────────────────────────────
-        for (int py = 0; py < resolution; py++) {
-            for (int px = 0; px < resolution; px++) {
-                // Center of pixel in NDC
-                double ndcCX =  (2.0 * px + 1.0) / resolution - 1.0;
-                double ndcCY = 1.0 - (2.0 * py + 1.0) / resolution;
+        for (int py = 0; py < resH; py++) {
+            for (int px = 0; px < resW; px++) {
+                // Center of pixel in NDC (−1..+1 range independently on each axis)
+                double ndcCX =  (2.0 * px + 1.0) / resW - 1.0;
+                double ndcCY = 1.0 - (2.0 * py + 1.0) / resH;
 
                 int    aSum = 0, rSum = 0, gSum = 0, bSum = 0;
                 float  depthAccum = 0f;
 
                 for (int s = 0; s < 4; s++) {
-                    double ndcX = ndcCX + JITTER_X[s] * pixStep;
-                    double ndcY = ndcCY + JITTER_Y[s] * pixStep;
+                    double ndcX = ndcCX + JITTER_X[s] * pixStepX;
+                    double ndcY = ndcCY + JITTER_Y[s] * pixStepY;
 
-                    double rdX = fwdX + rightX * ndcX * halfFov + upX * ndcY * halfFov;
-                    double rdY = fwdY +          ndcX * 0.0     + upY * ndcY * halfFov;
-                    double rdZ = fwdZ + rightZ * ndcX * halfFov + upZ * ndcY * halfFov;
+                    double rdX = fwdX + rightX * ndcX * halfFovW + upX * ndcY * halfFovH;
+                    double rdY = fwdY +                             upY * ndcY * halfFovH;
+                    double rdZ = fwdZ + rightZ * ndcX * halfFovW + upZ * ndcY * halfFovH;
 
                     double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
                     if (len < 1e-9) { aSum += 255; depthAccum += MAX_RAY_DIST; continue; }
@@ -310,7 +342,7 @@ public class LocalizedChunkCapture {
                 int argb = ((aSum / 4) << 24) | ((rSum / 4) << 16)
                          | ((gSum / 4) <<  8) |  (bSum / 4);
                 image.setPixelRGBA(px, py, toABGR(argb));
-                depthBuf[py * resolution + px] = depthAccum / 4f;
+                depthBuf[py * resW + px] = depthAccum / 4f;
             }
         }
 
@@ -327,19 +359,19 @@ public class LocalizedChunkCapture {
                 double projX = dx * rightX              + dz * rightZ;
                 double projY = dx * upX + dy * upY + dz * upZ;
 
-                double ndcEX = projX / (entityDepth * halfFov);
-                double ndcEY = projY / (entityDepth * halfFov);
+                double ndcEX = projX / (entityDepth * halfFovW);
+                double ndcEY = projY / (entityDepth * halfFovH);
 
-                int screenX = (int)((ndcEX + 1.0) * 0.5 * resolution);
-                int screenY = (int)((1.0 - ndcEY) * 0.5 * resolution);
+                int screenX = (int)((ndcEX + 1.0) * 0.5 * resW);
+                int screenY = (int)((1.0 - ndcEY) * 0.5 * resH);
 
                 int dotSize = Math.max(1, (int)(4.0 - entityDepth / 10.0));
                 for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
                     for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
                         int spx = screenX + dx2;
                         int spy = screenY + dy2;
-                        if (spx < 0 || spx >= resolution || spy < 0 || spy >= resolution) continue;
-                        if ((float) entityDepth < depthBuf[spy * resolution + spx] + 0.5f) {
+                        if (spx < 0 || spx >= resW || spy < 0 || spy >= resH) continue;
+                        if ((float) entityDepth < depthBuf[spy * resW + spx] + 0.5f) {
                             image.setPixelRGBA(spx, spy, toABGR(dot.argbColor()));
                         }
                     }
@@ -347,7 +379,7 @@ public class LocalizedChunkCapture {
             }
         }
 
-        flipVertical(image, resolution);
+        flipVertical(image, resW, resH);
         return image;
     }
 
@@ -503,10 +535,10 @@ public class LocalizedChunkCapture {
         return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
-    private static void flipVertical(NativeImage image, int resolution) {
-        for (int y = 0; y < resolution / 2; y++) {
-            int mirrorY = resolution - 1 - y;
-            for (int x = 0; x < resolution; x++) {
+    private static void flipVertical(NativeImage image, int width, int height) {
+        for (int y = 0; y < height / 2; y++) {
+            int mirrorY = height - 1 - y;
+            for (int x = 0; x < width; x++) {
                 int top    = image.getPixelRGBA(x, y);
                 int bottom = image.getPixelRGBA(x, mirrorY);
                 image.setPixelRGBA(x, y,       bottom);

@@ -375,6 +375,14 @@ public class PortalRenderEventHandler {
 
         float halfH = (maxY - minY) / 2.0f + 0.5f;
 
+        // Compute halfW for whichever axis applies, then store both on the data object
+        // so the raycaster can derive a per-portal FOV (window effect).
+        {
+            float hw = isXAxis ? (maxX - minX) / 2.0f + 0.5f : (maxZ - minZ) / 2.0f + 0.5f;
+            data.portalHalfW = hw;
+            data.portalHalfH = halfH;
+        }
+
         // Base offset: -0.52 pushes the quad inward (toward the player's side of the portal,
         // in front of CosmosPortals' color layer). Negative = toward player based on the
         // previous test where +0.52 went away from the player.

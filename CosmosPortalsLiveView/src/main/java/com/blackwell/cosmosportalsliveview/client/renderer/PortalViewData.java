@@ -32,6 +32,14 @@ public class PortalViewData {
     /** Incremented each time a new texture is set, so ResourceLocation keys stay unique. */
     private volatile int textureVersion = 0;
 
+    /**
+     * Half-width and half-height of the portal quad in blocks, updated each render frame.
+     * Used by the raycaster to compute a per-portal FOV so the live view behaves like a
+     * window: larger portal = wider view, smaller portal = narrower view.
+     */
+    public volatile float portalHalfW = 1.0f;
+    public volatile float portalHalfH = 1.0f;
+
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
 
