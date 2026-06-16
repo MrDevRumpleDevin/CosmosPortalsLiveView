@@ -203,23 +203,22 @@ public class LocalizedChunkCapture {
         double upZ = 0.0;
 
         // ── Pure-rotation parallax — "camera on a tripod" model ────────────────
-        // Camera origin stays fixed. View direction rotates by the angle the player
-        // makes when viewed through the portal frame — exactly like peering through
-        // a window from an angle.
+        // Camera origin stays fixed. Forward distance has NO effect on the rotation —
+        // getting closer/farther doesn't zoom or change the view, only side-to-side
+        // (and small up/down) movement of the player shifts what you see.
         //
-        //   parallaxRight > 0  →  player is to the RIGHT of portal centre
-        //                      →  angleYaw is positive
-        //                      →  we negate it so the camera turns LEFT (sees the
-        //                         left side of the destination room)  ← door logic
+        // angle (radians) = lateralOffset * scale
+        //   parallaxRight > 0  →  player RIGHT of portal → camera turns LEFT
+        //   parallaxUp > 0     →  player above portal centre → camera tilts DOWN
         //
-        //   parallaxUp > 0     →  player eye is ABOVE portal centre
-        //                      →  anglePitch positive → negate → camera tilts DOWN
+        // Up-component is deliberately damped (×0.25) — you mostly care about
+        // left/right parallax, vertical is a subtle secondary effect.
         //
-        // Scale from config lets the player tune the strength.
+        // parallaxForward is no longer used for angle computation; kept in signature
+        // for possible future use (e.g. distance-based capture interval scaling).
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-        double forwardDist = Math.max(0.5, parallaxForward);
-        double angleYaw   = -Math.atan2(parallaxRight * scale, forwardDist);
-        double anglePitch = -Math.atan2(parallaxUp    * scale, forwardDist);
+        double angleYaw   = -(double)(parallaxRight * scale) * 0.4;   // radians, lateral only
+        double anglePitch = -(double)(parallaxUp    * scale) * 0.1;   // damped — subtle vertical
 
         // Step 1: yaw rotation around world-up (0,1,0).
         double cosY = Math.cos(angleYaw), sinY = Math.sin(angleYaw);
