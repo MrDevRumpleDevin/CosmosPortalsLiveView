@@ -18,73 +18,55 @@ import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
-import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * Raycaster-based perspective renderer for portal live views.
  *
- * Quality improvements over the original:
- *  - Amanatides-Woo grid-aligned DDA (exact block crossing, no over/under-stepping)
- *  - Real block colors sampled from the BlockModelShaper particle sprite, tinted by
- *    BlockColors — snapshotted on the main thread before executor submit
- *  - 4× SSAA: 4 jittered sub-rays per pixel, results averaged
- *  - Face-normal AO: top face 100%, side faces 78%, bottom face 60%
- *  - Improved sky: horizon haze blending into deep blue, optional sun disk
+ * Rendering pipeline:
+ *  - Amanatides-Woo DDA walks the block grid
+ *  - On each non-air cell, Möller–Trumbore ray-quad intersection tests the actual
+ *    BakedModel geometry — slabs, stairs, doors, fences all have correct silhouettes
+ *  - Hit quad's sprite is sampled for color; tint (grass/leaves/water) applied
+ *  - Face-normal AO: top 100%, sides 78%, bottom 60%
+ *  - Distance fog blends toward sky at range
+ *  - 1× ray per pixel (SSAA disabled while geometry work is in progress)
  *
- * Threading model: color snapshot + entity snapshot run on the calling (main/render)
- * thread. All raycasting runs on CAPTURE_EXECUTOR — zero GL calls, safe.
- *
- * Image orientation (unchanged from original):
- *   NativeImage row 0 = first memory row. MC's shader maps V=0 to GL bottom.
- *   We render top-of-scene into row 0, then flipVertical() so the shader sees it
- *   right-side-up on the portal quad.
+ * Threading: entity snapshot runs on main thread. All raycasting + model reads run
+ * on CAPTURE_EXECUTOR — BakedModel/TextureAtlas are read-only after bake, safe.
  */
 @OnlyIn(Dist.CLIENT)
 public class LocalizedChunkCapture {
 
-    /**
-     * "Virtual screen distance" in blocks — the assumed distance between the viewer
-     * and the portal plane when computing the window-effect FOV.
-     * halfFovTan = portalHalfW / VIRTUAL_SCREEN_DIST → 1-block portal at 2 blocks away
-     * subtends ~26°, 3-block portal ~56°.  Tune this to taste.
-     */
-    private static final float VIRTUAL_SCREEN_DIST = 2.0f;
+    private static final float  VIRTUAL_SCREEN_DIST  = 2.0f;
+    private static final float  EYE_FORWARD_OFFSET   = -0.5f;
+    private static final int    MAX_RAY_DIST         = 48;
+    private static final double ENTITY_SCAN_RADIUS   = 32.0;
 
-    /**
-     * How many blocks to push the render eye forward along the view direction.
-     * destPos is the destination portal block itself; the player actually stands
-     * several blocks in front of it after crossing. This offset corrects for that
-     * so the live view matches what you'd see standing at the exit.
-     */
-    private static final float EYE_FORWARD_OFFSET = -0.5f;
-    private static final int     MAX_RAY_DIST     = 48;
-    private static final double  ENTITY_SCAN_RADIUS = 32.0;
-
-    /** 4× SSAA jitter offsets in pixel units (−0.5..+0.5 range). */
-    private static final double[] JITTER_X = { -0.25,  0.25, -0.25,  0.25 };
-    private static final double[] JITTER_Y = { -0.25, -0.25,  0.25,  0.25 };
-
-    /** Face AO multipliers — top / side / bottom. */
+    /** Face AO multipliers */
     private static final float AO_TOP    = 1.00f;
     private static final float AO_SIDE   = 0.78f;
     private static final float AO_BOTTOM = 0.60f;
 
-    /** Distance-based fog: full color at 0, fades toward sky at MAX_RAY_DIST. */
-    private static final float FOG_START = 20.0f; // blocks
+    /** Distance fog: full color until FOG_START, then blends to sky */
+    private static final float FOG_START = 20.0f;
+
+    /**
+     * Quad vertex stride in the int[] returned by BakedQuad.getVertices().
+     * Layout per vertex: [x_float, y_float, z_float, normal_int, u_float, v_float, misc, misc]
+     */
+    private static final int VERTEX_STRIDE = 8;
 
     private static final ExecutorService CAPTURE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "CosmosLiveView-Capture");
@@ -95,10 +77,6 @@ public class LocalizedChunkCapture {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    /**
-     * Schedules an async capture. No-op if a capture is already in flight for this portal.
-     * Must be called from the main/render thread (entity + color snapshots happen here).
-     */
     public static void captureAsync(PortalViewData portalData, Level level) {
         if (portalData == null) return;
         if (portalData.isCaptureInFlight()) return;
@@ -110,11 +88,9 @@ public class LocalizedChunkCapture {
         int baseRes = PortalLiveViewConfig.CAPTURE_RESOLUTION.get();
         baseRes = Math.max(64, Math.min(baseRes, 512));
 
-        // Scale image resolution to match portal aspect ratio so pixels aren't stretched.
-        // Width drives the base resolution; height scales proportionally.
-        float halfW = Math.max(0.5f, portalData.portalHalfW);
-        float halfH = Math.max(0.5f, portalData.portalHalfH);
-        float aspect = halfW / halfH; // >1 wide, <1 tall
+        float halfW  = Math.max(0.5f, portalData.portalHalfW);
+        float halfH  = Math.max(0.5f, portalData.portalHalfH);
+        float aspect = halfW / halfH;
         int resW, resH;
         if (aspect >= 1.0f) {
             resW = baseRes;
@@ -126,18 +102,17 @@ public class LocalizedChunkCapture {
 
         portalData.setCaptureInFlight(true);
 
-        // ── Snapshot on main thread ──────────────────────────────────────────
-        final List<EntityDot>          entityDots = snapshotEntities(sampleLevel, portalData.destPos);
-        final Map<BlockState, int[]>   colorMap   = snapshotBlockColors(sampleLevel, portalData.destPos);
+        // Entity snapshot must run on main thread
+        final List<EntityDot> entityDots = snapshotEntities(sampleLevel, portalData.destPos);
 
-        final Level    levelSnap = sampleLevel;
-        final int      resWSnap  = resW;
-        final int      resHSnap  = resH;
-        final float    yaw       = portalData.destYaw;
-        final float    pitch     = portalData.destPitch;
-        final BlockPos destPos   = portalData.destPos;
-        final float    halfWSnap = halfW;
-        final float    halfHSnap = halfH;
+        final Level    levelSnap  = sampleLevel;
+        final int      resWSnap   = resW;
+        final int      resHSnap   = resH;
+        final float    yaw        = portalData.destYaw;
+        final float    pitch      = portalData.destPitch;
+        final BlockPos destPos    = portalData.destPos;
+        final float    halfWSnap  = halfW;
+        final float    halfHSnap  = halfH;
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
@@ -145,7 +120,7 @@ public class LocalizedChunkCapture {
                 image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
-                                              entityDots, colorMap);
+                                              entityDots);
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
                     try {
@@ -164,119 +139,6 @@ public class LocalizedChunkCapture {
         });
     }
 
-    // ── Color snapshot (main thread) ───────────────────────────────────────────
-
-    /**
-     * Walks a cube of blocks around destPos, samples per-face colors for each unique
-     * BlockState using the block model's quads, and returns state → int[6] ARGB
-     * indexed by Direction.ordinal() (DOWN=0, UP=1, NORTH=2, SOUTH=3, WEST=4, EAST=5).
-     *
-     * Must run on the main/render thread — ModelShaper and TextureAtlas are not thread-safe.
-     */
-    private static Map<BlockState, int[]> snapshotBlockColors(Level level, BlockPos center) {
-        Map<BlockState, int[]> map = new HashMap<>();
-        Minecraft mc = Minecraft.getInstance();
-
-        int radius = Math.min(MAX_RAY_DIST + 2, 50);
-        int cx = center.getX(), cy = center.getY(), cz = center.getZ();
-
-        for (int x = cx - radius; x <= cx + radius; x++) {
-            for (int y = Math.max(level.getMinBuildHeight(), cy - radius);
-                     y <= Math.min(level.getMaxBuildHeight(), cy + radius); y++) {
-                for (int z = cz - radius; z <= cz + radius; z++) {
-                    BlockPos bp = new BlockPos(x, y, z);
-                    BlockState state = level.getBlockState(bp);
-                    if (state.isAir() || map.containsKey(state)) continue;
-
-                    int[] faceColors = new int[6];
-                    for (Direction face : Direction.values()) {
-                        faceColors[face.ordinal()] = sampleFaceColor(mc, state, level, bp, face);
-                    }
-                    map.put(state, faceColors);
-                }
-            }
-        }
-        return map;
-    }
-
-    /**
-     * Samples the average color of a specific face of a block, using the BakedModel's
-     * quads for that face. Falls back to particle icon, then to fallbackColor table.
-     * Tint via BlockColors is applied (grass, leaves, water, etc.).
-     */
-    private static int sampleFaceColor(Minecraft mc, BlockState state,
-                                        Level level, BlockPos pos, Direction face) {
-        try {
-            RandomSource rand = RandomSource.create(0L);
-            List<BakedQuad> quads = mc.getModelManager()
-                    .getBlockModelShaper()
-                    .getBlockModel(state)
-                    .getQuads(state, face, rand);
-
-            TextureAtlasSprite sprite = null;
-            int tintIndex = -1;
-
-            if (!quads.isEmpty()) {
-                BakedQuad quad = quads.get(0);
-                sprite = quad.getSprite();
-                tintIndex = quad.isTinted() ? quad.getTintIndex() : -1;
-            }
-
-            // Fall back to particle icon if no quads for this face
-            if (sprite == null) {
-                sprite = mc.getModelManager()
-                        .getBlockModelShaper()
-                        .getBlockModel(state)
-                        .getParticleIcon();
-            }
-
-            int rSum = 0, gSum = 0, bSum = 0, aSum = 0, n = 0;
-            int spriteW = Math.max(1, sprite.contents().width());
-            int spriteH = Math.max(1, sprite.contents().height());
-
-            // Sample up to 8×8 = 64 points for better color accuracy
-            int gridN = Math.min(8, spriteW);
-            int gridM = Math.min(8, spriteH);
-            for (int gi = 0; gi < gridN; gi++) {
-                for (int gj = 0; gj < gridM; gj++) {
-                    int sx = Math.min((int)((gi + 0.5) * spriteW / gridN), spriteW - 1);
-                    int sy = Math.min((int)((gj + 0.5) * spriteH / gridM), spriteH - 1);
-                    // getPixelRGBA returns NativeImage ABGR layout (A=byte3, B=byte2, G=byte1, R=byte0)
-                    int px = sprite.contents().getOriginalImage().getPixelRGBA(sx, sy);
-                    int pa = (px >> 24) & 0xFF;
-                    if (pa < 10) { aSum += pa; continue; } // count transparent pixels for avg alpha
-                    int pr = (px      ) & 0xFF; // R in ABGR is byte 0
-                    int pg = (px >>  8) & 0xFF;
-                    int pb = (px >> 16) & 0xFF;
-                    rSum += pr; gSum += pg; bSum += pb; aSum += pa; n++;
-                }
-            }
-
-            int totalSamples = gridN * gridM;
-            if (n == 0) return fallbackColor(state);
-
-            int r = rSum / n, g = gSum / n, b = bSum / n;
-            // Average alpha across ALL samples (including transparent ones) so
-            // glass/doors get low alpha → the DDA transparency blend activates
-            int avgAlpha = aSum / totalSamples;
-
-            // Apply biome/block tint
-            if (tintIndex >= 0) {
-                int tint = mc.getBlockColors().getColor(state, level, pos, tintIndex);
-                if (tint != -1) {
-                    r = (r * ((tint >> 16) & 0xFF)) / 255;
-                    g = (g * ((tint >>  8) & 0xFF)) / 255;
-                    b = (b * ( tint        & 0xFF)) / 255;
-                }
-            }
-
-            return (avgAlpha << 24) | (r << 16) | (g << 8) | b;
-
-        } catch (Exception e) {
-            return fallbackColor(state);
-        }
-    }
-
     // ── Entity snapshot (main thread) ──────────────────────────────────────────
 
     private record EntityDot(double x, double y, double z, int argbColor) {}
@@ -291,10 +153,10 @@ public class LocalizedChunkCapture {
                     origin.getZ() + ENTITY_SCAN_RADIUS);
             for (Entity e : level.getEntities(null, scanBox)) {
                 int color;
-                if      (e instanceof Player)      color = 0xFFFFFF00;
-                else if (e instanceof Monster)     color = 0xFFFF3030;
-                else if (e instanceof Animal)      color = 0xFF90EE90;
-                else if (e instanceof LivingEntity)color = 0xFFFFFFFF;
+                if      (e instanceof Player)       color = 0xFFFFFF00;
+                else if (e instanceof Monster)      color = 0xFFFF3030;
+                else if (e instanceof Animal)       color = 0xFF90EE90;
+                else if (e instanceof LivingEntity) color = 0xFFFFFFFF;
                 else continue;
                 dots.add(new EntityDot(e.getX(), e.getY() + e.getEyeHeight(), e.getZ(), color));
             }
@@ -308,114 +170,84 @@ public class LocalizedChunkCapture {
                                                       float yawDeg, float pitchDeg,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
-                                                      List<EntityDot> entityDots,
-                                                      Map<BlockState, int[]> colorMap) {
+                                                      List<EntityDot> entityDots) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
         double yawRad   = Math.toRadians(yawDeg);
         double pitchRad = Math.toRadians(pitchDeg);
 
-        // Camera basis vectors
         double fwdX = -Math.sin(yawRad) * Math.cos(pitchRad);
         double fwdY = -Math.sin(pitchRad);
         double fwdZ =  Math.cos(yawRad) * Math.cos(pitchRad);
 
-        // Start at block center + eye height, then push forward along the view direction
-        // so the render origin matches where the player actually stands after crossing.
         double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET;
         double eyeY = eyePos.getY() + 1.62 + fwdY * EYE_FORWARD_OFFSET;
         double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET;
 
-        double rightX = Math.cos(yawRad);
-        double rightZ = Math.sin(yawRad);
-        // rightY = 0 (horizontal right vector)
+        double rightX =  Math.cos(yawRad);
+        double rightZ =  Math.sin(yawRad);
 
         // up = right × fwd
         double upX = -rightZ * fwdY;
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
 
-        // Window-effect FOV: the portal acts like a window at VIRTUAL_SCREEN_DIST blocks away.
-        // halfFovH/W = portalHalf / VIRTUAL_SCREEN_DIST.  Each NDC unit maps to this many
-        // world-space units, so a larger portal reveals more of the scene.
         double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
         double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;
 
-        double pixStepX = 2.0 / resW;
-        double pixStepY = 2.0 / resH;
-
         float[] depthBuf = new float[resW * resH];
 
-        // ── 4× SSAA block raycasting ──────────────────────────────────────────
         for (int py = 0; py < resH; py++) {
             for (int px = 0; px < resW; px++) {
-                // Center of pixel in NDC (−1..+1 range independently on each axis)
-                double ndcCX =  (2.0 * px + 1.0) / resW - 1.0;
-                double ndcCY = 1.0 - (2.0 * py + 1.0) / resH;
+                double ndcX =  (2.0 * px + 1.0) / resW - 1.0;
+                double ndcY = 1.0 - (2.0 * py + 1.0) / resH;
 
-                int    aSum = 0, rSum = 0, gSum = 0, bSum = 0;
-                float  depthAccum = 0f;
+                double rdX = fwdX + rightX * ndcX * halfFovW + upX * ndcY * halfFovH;
+                double rdY = fwdY +                            upY * ndcY * halfFovH;
+                double rdZ = fwdZ + rightZ * ndcX * halfFovW + upZ * ndcY * halfFovH;
 
-                for (int s = 0; s < 4; s++) {
-                    double ndcX = ndcCX + JITTER_X[s] * pixStepX;
-                    double ndcY = ndcCY + JITTER_Y[s] * pixStepY;
-
-                    double rdX = fwdX + rightX * ndcX * halfFovW + upX * ndcY * halfFovH;
-                    double rdY = fwdY +                             upY * ndcY * halfFovH;
-                    double rdZ = fwdZ + rightZ * ndcX * halfFovW + upZ * ndcY * halfFovH;
-
-                    double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
-                    if (len < 1e-9) { aSum += 255; depthAccum += MAX_RAY_DIST; continue; }
-                    rdX /= len; rdY /= len; rdZ /= len;
-
-                    int[] hit = new int[1];
-                    float dist = ddaRay(level, eyeX, eyeY, eyeZ, rdX, rdY, rdZ,
-                                        hit, colorMap);
-
-                    // Unpack ARGB sample
-                    int col = hit[0];
-                    aSum += (col >> 24) & 0xFF;
-                    rSum += (col >> 16) & 0xFF;
-                    gSum += (col >>  8) & 0xFF;
-                    bSum +=  col        & 0xFF;
-                    depthAccum += dist;
+                double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
+                if (len < 1e-9) {
+                    image.setPixelRGBA(px, py, toABGR(computeSkyColor(0)));
+                    depthBuf[py * resW + px] = MAX_RAY_DIST;
+                    continue;
                 }
+                rdX /= len; rdY /= len; rdZ /= len;
 
-                int argb = ((aSum / 4) << 24) | ((rSum / 4) << 16)
-                         | ((gSum / 4) <<  8) |  (bSum / 4);
-                image.setPixelRGBA(px, py, toABGR(argb));
-                depthBuf[py * resW + px] = depthAccum / 4f;
+                int[] hitColor = new int[1];
+                float dist = ddaRay(level, eyeX, eyeY, eyeZ, rdX, rdY, rdZ, hitColor);
+
+                image.setPixelRGBA(px, py, toABGR(hitColor[0]));
+                depthBuf[py * resW + px] = dist;
             }
         }
 
-        // ── Entity dots ───────────────────────────────────────────────────────
+        // Entity dots
         if (!entityDots.isEmpty()) {
             for (EntityDot dot : entityDots) {
                 double dx = dot.x() - eyeX;
                 double dy = dot.y() - eyeY;
                 double dz = dot.z() - eyeZ;
 
-                double entityDepth = dx * fwdX + dy * fwdY + dz * fwdZ;
-                if (entityDepth < 0.5) continue;
+                double depth = dx * fwdX + dy * fwdY + dz * fwdZ;
+                if (depth < 0.5) continue;
 
                 double projX = dx * rightX              + dz * rightZ;
                 double projY = dx * upX + dy * upY + dz * upZ;
 
-                double ndcEX = projX / (entityDepth * halfFovW);
-                double ndcEY = projY / (entityDepth * halfFovH);
+                double ndcEX = projX / (depth * halfFovW);
+                double ndcEY = projY / (depth * halfFovH);
 
                 int screenX = (int)((ndcEX + 1.0) * 0.5 * resW);
                 int screenY = (int)((1.0 - ndcEY) * 0.5 * resH);
 
-                int dotSize = Math.max(1, (int)(4.0 - entityDepth / 10.0));
+                int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
                 for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
                     for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
-                        int spx = screenX + dx2;
-                        int spy = screenY + dy2;
+                        int spx = screenX + dx2, spy = screenY + dy2;
                         if (spx < 0 || spx >= resW || spy < 0 || spy >= resH) continue;
-                        if ((float) entityDepth < depthBuf[spy * resW + spx] + 0.5f) {
+                        if ((float) depth < depthBuf[spy * resW + spx] + 0.5f)
                             image.setPixelRGBA(spx, spy, toABGR(dot.argbColor()));
-                        }
                     }
                 }
             }
@@ -425,36 +257,24 @@ public class LocalizedChunkCapture {
         return image;
     }
 
-    // ── Amanatides-Woo DDA ────────────────────────────────────────────────────
+    // ── Amanatides-Woo DDA + quad intersection ────────────────────────────────
 
-    /**
-     * Traces a ray using exact grid-aligned DDA (Amanatides & Woo, 1987).
-     * Visits each block cell exactly once per axis crossing — no over/under-step.
-     *
-     * @param hit    out-param: hit[0] = final ARGB pixel color (block or sky)
-     * @return       hit distance in blocks (MAX_RAY_DIST for sky)
-     */
     private static float ddaRay(Level level,
-                                  double ox, double oy, double oz,
-                                  double dx, double dy, double dz,
-                                  int[] hit,
-                                  Map<BlockState, int[]> colorMap) {
-        // Current voxel
+                                 double ox, double oy, double oz,
+                                 double dx, double dy, double dz,
+                                 int[] hit) {
         int bx = (int) Math.floor(ox);
         int by = (int) Math.floor(oy);
         int bz = (int) Math.floor(oz);
 
-        // Step directions
         int sx = dx >= 0 ? 1 : -1;
         int sy = dy >= 0 ? 1 : -1;
         int sz = dz >= 0 ? 1 : -1;
 
-        // tDelta: how far along the ray we travel per unit step in each axis
         double tDeltaX = Math.abs(dx) < 1e-12 ? Double.MAX_VALUE : Math.abs(1.0 / dx);
         double tDeltaY = Math.abs(dy) < 1e-12 ? Double.MAX_VALUE : Math.abs(1.0 / dy);
         double tDeltaZ = Math.abs(dz) < 1e-12 ? Double.MAX_VALUE : Math.abs(1.0 / dz);
 
-        // tMax: distance to first crossing of each axis boundary
         double tMaxX = Math.abs(dx) < 1e-12 ? Double.MAX_VALUE
                 : (dx > 0 ? (Math.floor(ox) + 1 - ox) : (ox - Math.floor(ox))) / Math.abs(dx);
         double tMaxY = Math.abs(dy) < 1e-12 ? Double.MAX_VALUE
@@ -462,127 +282,292 @@ public class LocalizedChunkCapture {
         double tMaxZ = Math.abs(dz) < 1e-12 ? Double.MAX_VALUE
                 : (dz > 0 ? (Math.floor(oz) + 1 - oz) : (oz - Math.floor(oz))) / Math.abs(dz);
 
-        Direction hitFace = Direction.NORTH; // default, updated per step
-
         double t = 0.0;
         int minY = level.getMinBuildHeight();
         int maxY = level.getMaxBuildHeight();
 
         while (t < MAX_RAY_DIST) {
-            // Advance to next crossing
+            // Step to next cell boundary
             if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-                t = tMaxX; tMaxX += tDeltaX;
-                bx += sx;
-                hitFace = sx > 0 ? Direction.WEST : Direction.EAST;
+                t = tMaxX; tMaxX += tDeltaX; bx += sx;
             } else if (tMaxY < tMaxZ) {
-                t = tMaxY; tMaxY += tDeltaY;
-                by += sy;
-                hitFace = sy > 0 ? Direction.DOWN : Direction.UP;
+                t = tMaxY; tMaxY += tDeltaY; by += sy;
             } else {
-                t = tMaxZ; tMaxZ += tDeltaZ;
-                bz += sz;
-                hitFace = sz > 0 ? Direction.NORTH : Direction.SOUTH;
+                t = tMaxZ; tMaxZ += tDeltaZ; bz += sz;
             }
 
             if (t >= MAX_RAY_DIST) break;
             if (by < minY || by > maxY) break;
 
-            BlockPos bp    = new BlockPos(bx, by, bz);
-            BlockState state = level.getBlockState(bp);
+            BlockState state = level.getBlockState(new BlockPos(bx, by, bz));
+            if (state.isAir() || state.getRenderShape() == RenderShape.INVISIBLE) continue;
 
-            if (!state.isAir() && state.getRenderShape() != RenderShape.INVISIBLE) {
-                // Open doors: thin model that doesn't fill the block — skip so rays
-                // pass through them (open door = no visual obstruction like a wall)
-                if (state.getBlock() instanceof DoorBlock
-                        && state.hasProperty(BlockStateProperties.OPEN)
-                        && state.getValue(BlockStateProperties.OPEN)) {
-                    continue;
-                }
+            // Intersect ray against this block's actual quad geometry.
+            // tEntry = how far along the ray we entered this cell.
+            double tEntry = t;
+            QuadHit qh = intersectBlockQuads(state, level, new BlockPos(bx, by, bz),
+                                              ox, oy, oz, dx, dy, dz, tEntry);
+            if (qh == null) continue; // ray passed through geometry gap (open door, slab air half, etc.)
 
-                // Look up per-face pre-sampled color; fall back to hardcoded table
-                int[] faceColors = colorMap.get(state);
-                int baseColor = (faceColors != null)
-                        ? faceColors[hitFace.ordinal()]
-                        : fallbackColor(state);
+            // Sample color from the hit quad's sprite
+            int baseColor = sampleSpriteColor(qh.sprite, qh.tintIndex, state, level,
+                                              new BlockPos(bx, by, bz));
 
-                // Transparent blocks: blend with sky/background instead of opaque hit.
-                // Alpha < 200 (out of 255) is treated as partially transparent.
-                int baseAlpha = (baseColor >> 24) & 0xFF;
-                if (baseAlpha < 200) {
-                    // Blend: keep tracing for sky color, then composite block over it
-                    int skyCol = computeSkyColor(dy);
-                    float blendT = 1.0f - (baseAlpha / 255.0f); // 0 = opaque, 1 = fully transparent
-                    // Slightly tint with block color, mostly show through
-                    int r = ((baseColor >> 16) & 0xFF);
-                    int g = ((baseColor >>  8) & 0xFF);
-                    int b = ( baseColor        & 0xFF);
-                    int sr = (skyCol >> 16) & 0xFF;
-                    int sg = (skyCol >>  8) & 0xFF;
-                    int sb =  skyCol        & 0xFF;
-                    // Additive tint: mix block color lightly into sky
-                    r = Math.min(255, (int)(r * (1f - blendT) + sr * blendT));
-                    g = Math.min(255, (int)(g * (1f - blendT) + sg * blendT));
-                    b = Math.min(255, (int)(b * (1f - blendT) + sb * blendT));
-                    hit[0] = (0xFF << 24) | (r << 16) | (g << 8) | b;
-                    return (float) t;
-                }
-
-                // Face-normal AO
-                float ao;
-                switch (hitFace) {
-                    case UP:    ao = AO_TOP;    break;
-                    case DOWN:  ao = AO_BOTTOM; break;
-                    default:    ao = AO_SIDE;   break;
-                }
-
-                // Distance fog: lerp block color → sky at FAR
-                float fogT = (float) Math.max(0.0, (t - FOG_START) / (MAX_RAY_DIST - FOG_START));
-                fogT = Math.min(1.0f, fogT * fogT); // quadratic, feels more natural
-
-                int skyCol  = computeSkyColor(dy);
-                int shadedBlock = shadeColor(baseColor, ao);
-                int finalCol   = lerpColor(shadedBlock, skyCol, fogT);
-
-                hit[0] = finalCol;
-                return (float) t;
+            // Transparency: glass panes, ice, etc. — blend with sky
+            int alpha = (baseColor >> 24) & 0xFF;
+            if (alpha < 200) {
+                int skyCol = computeSkyColor(dy);
+                float blendT = 1.0f - (alpha / 255.0f);
+                int r = blend((baseColor >> 16) & 0xFF, (skyCol >> 16) & 0xFF, blendT);
+                int g = blend((baseColor >>  8) & 0xFF, (skyCol >>  8) & 0xFF, blendT);
+                int b = blend( baseColor        & 0xFF,  skyCol        & 0xFF, blendT);
+                hit[0] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                return (float) qh.t;
             }
+
+            // AO by face normal
+            float ao;
+            double ny = qh.ny;
+            if      (ny >  0.5) ao = AO_TOP;
+            else if (ny < -0.5) ao = AO_BOTTOM;
+            else                ao = AO_SIDE;
+
+            // Fog
+            float fogT = (float) Math.max(0.0, (qh.t - FOG_START) / (MAX_RAY_DIST - FOG_START));
+            fogT = Math.min(1.0f, fogT * fogT);
+
+            int shaded = shadeColor(baseColor, ao);
+            hit[0] = lerpColor(shaded, computeSkyColor(dy), fogT);
+            return (float) qh.t;
         }
 
         hit[0] = computeSkyColor(dy);
         return MAX_RAY_DIST;
     }
 
-    // ── Sky ────────────────────────────────────────────────────────────────────
+    // ── Quad geometry intersection ─────────────────────────────────────────────
+
+    /** Result of a successful ray-quad intersection inside a block cell. */
+    private record QuadHit(double t, double nx, double ny, double nz,
+                            TextureAtlasSprite sprite, int tintIndex) {}
 
     /**
-     * Sky gradient: deep blue above, horizon haze (light grey-blue) near the horizon,
-     * with a subtle sun disk when looking nearly upward.
+     * Tests the ray against every BakedQuad in the block's model (all 6 directional
+     * faces + unculled quads). Returns the closest hit inside [tEntry, tEntry+√3],
+     * or null if the ray passes through without hitting any geometry.
      *
-     * @param rdY  normalized ray Y component (−1 to +1)
+     * Vertex layout in BakedQuad.getVertices() (stride 8 ints per vertex):
+     *   [0] x as float bits, [1] y as float bits, [2] z as float bits,
+     *   [3] normal packed, [4] u as float bits, [5] v as float bits, [6-7] misc
      */
-    private static int computeSkyColor(double rdY) {
-        // Base sky gradient
-        float t = (float) Math.max(0.0, Math.min(1.0, rdY));
-        // Horizon colour: light blue-grey; zenith: deep blue
-        int hr = 180, hg = 210, hb = 230; // horizon
-        int zr =  20, zg =  60, zb = 160; // zenith
+    private static QuadHit intersectBlockQuads(BlockState state, Level level, BlockPos bp,
+                                                double ox, double oy, double oz,
+                                                double dx, double dy, double dz,
+                                                double tEntry) {
+        Minecraft mc = Minecraft.getInstance();
+        RandomSource rand = RandomSource.create(42L);
 
+        // Collect all quads: unculled (null face) + each of 6 directional faces
+        List<BakedQuad> allQuads = new ArrayList<>();
+        try {
+            var model = mc.getModelManager().getBlockModelShaper().getBlockModel(state);
+            // Unculled quads (most geometry is here for non-full-cube blocks)
+            allQuads.addAll(model.getQuads(state, null, rand));
+            for (Direction face : Direction.values()) {
+                allQuads.addAll(model.getQuads(state, face, rand));
+            }
+        } catch (Exception e) {
+            return null;
+        }
+
+        if (allQuads.isEmpty()) return null;
+
+        // Block-local ray origin: shift so block corner = (0,0,0)
+        double lox = ox - bp.getX();
+        double loy = oy - bp.getY();
+        double loz = oz - bp.getZ();
+
+        double bestT  = Double.MAX_VALUE;
+        double bestNX = 0, bestNY = 1, bestNZ = 0;
+        TextureAtlasSprite bestSprite  = null;
+        int                bestTint    = -1;
+
+        // Search window: ray must hit within the cell's diagonal (max √3 ≈ 1.732)
+        double tMin = Math.max(0.0, tEntry - 0.01); // slight back-step for rays starting inside
+        double tMax = tEntry + 1.8;
+
+        for (BakedQuad quad : allQuads) {
+            int[] verts = quad.getVertices();
+            if (verts.length < 4 * VERTEX_STRIDE) continue;
+
+            // Unpack 4 vertices
+            float x0 = Float.intBitsToFloat(verts[0]);
+            float y0 = Float.intBitsToFloat(verts[1]);
+            float z0 = Float.intBitsToFloat(verts[2]);
+            float x1 = Float.intBitsToFloat(verts[VERTEX_STRIDE]);
+            float y1 = Float.intBitsToFloat(verts[VERTEX_STRIDE + 1]);
+            float z1 = Float.intBitsToFloat(verts[VERTEX_STRIDE + 2]);
+            float x2 = Float.intBitsToFloat(verts[2 * VERTEX_STRIDE]);
+            float y2 = Float.intBitsToFloat(verts[2 * VERTEX_STRIDE + 1]);
+            float z2 = Float.intBitsToFloat(verts[2 * VERTEX_STRIDE + 2]);
+            float x3 = Float.intBitsToFloat(verts[3 * VERTEX_STRIDE]);
+            float y3 = Float.intBitsToFloat(verts[3 * VERTEX_STRIDE + 1]);
+            float z3 = Float.intBitsToFloat(verts[3 * VERTEX_STRIDE + 2]);
+
+            // Test two triangles of the quad: (v0,v1,v2) and (v0,v2,v3)
+            double t1 = mollerTrumbore(lox, loy, loz, dx, dy, dz,
+                                        x0, y0, z0, x1, y1, z1, x2, y2, z2);
+            double t2 = mollerTrumbore(lox, loy, loz, dx, dy, dz,
+                                        x0, y0, z0, x2, y2, z2, x3, y3, z3);
+
+            for (double tHit : new double[]{t1, t2}) {
+                if (tHit < tMin || tHit > tMax) continue;
+                if (tHit < bestT) {
+                    bestT = tHit;
+                    // Compute face normal from edge vectors
+                    double e1x = x1 - x0, e1y = y1 - y0, e1z = z1 - z0;
+                    double e2x = x2 - x0, e2y = y2 - y0, e2z = z2 - z0;
+                    double nx = e1y * e2z - e1z * e2y;
+                    double ny = e1z * e2x - e1x * e2z;
+                    double nz = e1x * e2y - e1y * e2x;
+                    double nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
+                    if (nl > 1e-9) { nx /= nl; ny /= nl; nz /= nl; }
+                    // Flip normal toward ray origin
+                    if (nx * dx + ny * dy + nz * dz > 0) { nx = -nx; ny = -ny; nz = -nz; }
+                    bestNX = nx; bestNY = ny; bestNZ = nz;
+                    bestSprite = quad.getSprite();
+                    bestTint   = quad.isTinted() ? quad.getTintIndex() : -1;
+                }
+            }
+        }
+
+        if (bestSprite == null) return null;
+        return new QuadHit(bestT, bestNX, bestNY, bestNZ, bestSprite, bestTint);
+    }
+
+    /**
+     * Möller–Trumbore ray-triangle intersection.
+     * Returns t along the ray, or -1 if no intersection.
+     * All coordinates in block-local space (origin at block corner).
+     */
+    private static double mollerTrumbore(double ox, double oy, double oz,
+                                          double dx, double dy, double dz,
+                                          double ax, double ay, double az,
+                                          double bx, double by, double bz,
+                                          double cx, double cy, double cz) {
+        final double EPS = 1e-8;
+
+        double e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+        double e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+
+        // h = d × e2
+        double hx = dy * e2z - dz * e2y;
+        double hy = dz * e2x - dx * e2z;
+        double hz = dx * e2y - dy * e2x;
+
+        double det = e1x * hx + e1y * hy + e1z * hz;
+        if (Math.abs(det) < EPS) return -1.0; // parallel
+
+        double invDet = 1.0 / det;
+
+        // s = o - a
+        double sx = ox - ax, sy = oy - ay, sz = oz - az;
+
+        double u = (sx * hx + sy * hy + sz * hz) * invDet;
+        if (u < 0.0 || u > 1.0) return -1.0;
+
+        // q = s × e1
+        double qx = sy * e1z - sz * e1y;
+        double qy = sz * e1x - sx * e1z;
+        double qz = sx * e1y - sy * e1x;
+
+        double v = (dx * qx + dy * qy + dz * qz) * invDet;
+        if (v < 0.0 || u + v > 1.0) return -1.0;
+
+        double t = (e2x * qx + e2y * qy + e2z * qz) * invDet;
+        return t > EPS ? t : -1.0;
+    }
+
+    // ── Sprite color sampling ──────────────────────────────────────────────────
+
+    /**
+     * Samples the average color from a sprite, applying block tint (grass/leaves/water).
+     * Uses an 8×8 grid sample for good accuracy.
+     */
+    private static int sampleSpriteColor(TextureAtlasSprite sprite, int tintIndex,
+                                          BlockState state, Level level, BlockPos pos) {
+        if (sprite == null) return fallbackColor(state);
+        try {
+            int spriteW = Math.max(1, sprite.contents().width());
+            int spriteH = Math.max(1, sprite.contents().height());
+
+            int gridN = Math.min(8, spriteW);
+            int gridM = Math.min(8, spriteH);
+
+            int rSum = 0, gSum = 0, bSum = 0, aSum = 0, n = 0;
+            int total = gridN * gridM;
+
+            for (int gi = 0; gi < gridN; gi++) {
+                for (int gj = 0; gj < gridM; gj++) {
+                    int sx = Math.min((int)((gi + 0.5) * spriteW / gridN), spriteW - 1);
+                    int sy = Math.min((int)((gj + 0.5) * spriteH / gridM), spriteH - 1);
+                    // NativeImage pixel layout: ABGR (A=bits31-24, B=bits23-16, G=bits15-8, R=bits7-0)
+                    int px = sprite.contents().getOriginalImage().getPixelRGBA(sx, sy);
+                    int pa = (px >> 24) & 0xFF;
+                    aSum += pa;
+                    if (pa < 10) continue;
+                    rSum += (px      ) & 0xFF;  // R
+                    gSum += (px >>  8) & 0xFF;  // G
+                    bSum += (px >> 16) & 0xFF;  // B
+                    n++;
+                }
+            }
+
+            if (n == 0) return fallbackColor(state);
+
+            int r = rSum / n, g = gSum / n, b = bSum / n;
+            int avgAlpha = aSum / total; // averaged over all samples including transparent
+
+            // Apply biome tint (grass, leaves, water, etc.)
+            if (tintIndex >= 0) {
+                Minecraft mc = Minecraft.getInstance();
+                int tint = mc.getBlockColors().getColor(state, level, pos, tintIndex);
+                if (tint != -1) {
+                    r = (r * ((tint >> 16) & 0xFF)) / 255;
+                    g = (g * ((tint >>  8) & 0xFF)) / 255;
+                    b = (b * ( tint        & 0xFF)) / 255;
+                }
+            }
+
+            return (avgAlpha << 24) | (r << 16) | (g << 8) | b;
+        } catch (Exception e) {
+            return fallbackColor(state);
+        }
+    }
+
+    // ── Sky ────────────────────────────────────────────────────────────────────
+
+    private static int computeSkyColor(double rdY) {
+        float t = (float) Math.max(0.0, Math.min(1.0, rdY));
+        int hr = 180, hg = 210, hb = 230;
+        int zr =  20, zg =  60, zb = 160;
         int r = (int)(hr + t * (zr - hr));
         int g = (int)(hg + t * (zg - hg));
         int b = (int)(hb + t * (zb - hb));
-
-        // Below-horizon: blend to brownish ground haze
         if (rdY < 0) {
             float u = (float) Math.min(1.0, -rdY * 2.0);
             r = (int)(r + u * (100 - r));
             g = (int)(g + u * ( 85 - g));
             b = (int)(b + u * ( 60 - b));
         }
-
         return (0xFF << 24) | (r << 16) | (g << 8) | b;
     }
 
-    // ── Colour helpers ─────────────────────────────────────────────────────────
+    // ── Color helpers ──────────────────────────────────────────────────────────
+
+    private static int blend(int a, int b, float t) {
+        return Math.min(255, (int)(a * (1f - t) + b * t));
+    }
 
     private static int shadeColor(int argb, float shade) {
         int a = (argb >> 24) & 0xFF;
@@ -601,7 +586,7 @@ public class LocalizedChunkCapture {
         return (0xFF << 24) | (r << 16) | (g << 8) | bl;
     }
 
-    /** 0xAARRGGBB → 0xAABBGGRR (NativeImage stores pixels as ABGR in memory). */
+    /** 0xAARRGGBB → 0xAABBGGRR (NativeImage stores pixels ABGR in memory). */
     private static int toABGR(int argb) {
         int a = (argb >> 24) & 0xFF;
         int r = (argb >> 16) & 0xFF;
@@ -624,44 +609,40 @@ public class LocalizedChunkCapture {
 
     // ── Fallback color table ───────────────────────────────────────────────────
 
-    /**
-     * Hardcoded color table used when sprite sampling fails or the block
-     * is not yet in the snapshot map (e.g. modded blocks not in the scan cube).
-     */
     private static int fallbackColor(BlockState state) {
         if (state == null || state.isAir()) return 0x00000000;
         int r = 110, g = 110, b = 110;
         try {
-            if      (state.is(Blocks.GRASS_BLOCK))                                   { r= 95; g=159; b= 53; }
-            else if (state.is(Blocks.DIRT) || state.is(Blocks.ROOTED_DIRT))          { r=139; g=101; b= 68; }
+            if      (state.is(Blocks.GRASS_BLOCK))                                    { r= 95; g=159; b= 53; }
+            else if (state.is(Blocks.DIRT) || state.is(Blocks.ROOTED_DIRT))           { r=139; g=101; b= 68; }
             else if (state.is(Blocks.STONE))                                          { r=128; g=128; b=128; }
-            else if (state.is(Blocks.COBBLESTONE) || state.is(Blocks.MOSSY_COBBLESTONE)){ r=108; g=108; b=108; }
-            else if (state.is(Blocks.OAK_LOG)   || state.is(Blocks.BIRCH_LOG)
-                  || state.is(Blocks.SPRUCE_LOG) || state.is(Blocks.JUNGLE_LOG)
-                  || state.is(Blocks.ACACIA_LOG) || state.is(Blocks.DARK_OAK_LOG))   { r=101; g= 77; b= 47; }
-            else if (state.is(Blocks.OAK_LEAVES) || state.is(Blocks.BIRCH_LEAVES)
-                  || state.is(Blocks.SPRUCE_LEAVES) || state.is(Blocks.JUNGLE_LEAVES)
-                  || state.is(Blocks.ACACIA_LEAVES) || state.is(Blocks.DARK_OAK_LEAVES)){ r=59; g=101; b=36; }
+            else if (state.is(Blocks.COBBLESTONE)||state.is(Blocks.MOSSY_COBBLESTONE)){ r=108; g=108; b=108; }
+            else if (state.is(Blocks.OAK_LOG)   ||state.is(Blocks.BIRCH_LOG)
+                  || state.is(Blocks.SPRUCE_LOG) ||state.is(Blocks.JUNGLE_LOG)
+                  || state.is(Blocks.ACACIA_LOG) ||state.is(Blocks.DARK_OAK_LOG))     { r=101; g= 77; b= 47; }
+            else if (state.is(Blocks.OAK_LEAVES)||state.is(Blocks.BIRCH_LEAVES)
+                  || state.is(Blocks.SPRUCE_LEAVES)||state.is(Blocks.JUNGLE_LEAVES)
+                  || state.is(Blocks.ACACIA_LEAVES)||state.is(Blocks.DARK_OAK_LEAVES)){ r= 59; g=101; b= 36; }
             else if (state.is(Blocks.WATER))                                          { r=  0; g=100; b=200; }
-            else if (state.is(Blocks.SAND) || state.is(Blocks.SANDSTONE))             { r=238; g=203; b=139; }
-            else if (state.is(Blocks.SNOW) || state.is(Blocks.SNOW_BLOCK))            { r=245; g=245; b=245; }
+            else if (state.is(Blocks.SAND)||state.is(Blocks.SANDSTONE))              { r=238; g=203; b=139; }
+            else if (state.is(Blocks.SNOW)||state.is(Blocks.SNOW_BLOCK))             { r=245; g=245; b=245; }
             else if (state.is(Blocks.NETHERRACK))                                     { r=114; g= 22; b= 22; }
-            else if (state.is(Blocks.SOUL_SAND) || state.is(Blocks.SOUL_SOIL))        { r= 75; g= 61; b= 50; }
-            else if (state.is(Blocks.END_STONE) || state.is(Blocks.END_STONE_BRICKS)) { r=220; g=213; b=150; }
+            else if (state.is(Blocks.SOUL_SAND)||state.is(Blocks.SOUL_SOIL))          { r= 75; g= 61; b= 50; }
+            else if (state.is(Blocks.END_STONE)||state.is(Blocks.END_STONE_BRICKS))   { r=220; g=213; b=150; }
             else if (state.is(Blocks.BEDROCK))                                         { r= 50; g= 50; b= 50; }
             else if (state.is(Blocks.GRAVEL))                                          { r=147; g=139; b=131; }
-            else if (state.is(Blocks.DEEPSLATE) || state.is(Blocks.COBBLED_DEEPSLATE)){ r= 70; g= 68; b= 80; }
-            else if (state.is(Blocks.OAK_PLANKS)  || state.is(Blocks.SPRUCE_PLANKS)
-                  || state.is(Blocks.BIRCH_PLANKS) || state.is(Blocks.JUNGLE_PLANKS)) { r=180; g=130; b= 70; }
-            else if (state.is(Blocks.GLASS) || state.is(Blocks.GLASS_PANE))           { r=200; g=230; b=240; }
+            else if (state.is(Blocks.DEEPSLATE)||state.is(Blocks.COBBLED_DEEPSLATE))  { r= 70; g= 68; b= 80; }
+            else if (state.is(Blocks.OAK_PLANKS) ||state.is(Blocks.SPRUCE_PLANKS)
+                  || state.is(Blocks.BIRCH_PLANKS)||state.is(Blocks.JUNGLE_PLANKS))   { r=180; g=130; b= 70; }
+            else if (state.is(Blocks.GLASS)||state.is(Blocks.GLASS_PANE))             { r=200; g=230; b=240; }
             else if (state.is(Blocks.LAVA))                                            { r=220; g= 90; b= 10; }
             else if (state.is(Blocks.GLOWSTONE))                                       { r=255; g=220; b=120; }
             else if (state.is(Blocks.NETHER_BRICKS))                                   { r= 80; g= 20; b= 20; }
-            else if (state.is(Blocks.STONE_BRICKS) || state.is(Blocks.MOSSY_STONE_BRICKS)){ r=110; g=110; b=115; }
+            else if (state.is(Blocks.STONE_BRICKS)||state.is(Blocks.MOSSY_STONE_BRICKS)){ r=110;g=110; b=115; }
             else if (state.is(Blocks.BRICKS))                                          { r=160; g= 90; b= 70; }
             else if (state.is(Blocks.CLAY))                                            { r=160; g=160; b=175; }
-            else if (state.is(Blocks.PACKED_ICE) || state.is(Blocks.ICE))             { r=160; g=195; b=220; }
-            else if (state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN))    { r= 20; g= 15; b= 30; }
+            else if (state.is(Blocks.PACKED_ICE)||state.is(Blocks.ICE))               { r=160; g=195; b=220; }
+            else if (state.is(Blocks.OBSIDIAN)||state.is(Blocks.CRYING_OBSIDIAN))      { r= 20; g= 15; b= 30; }
             else if (state.is(Blocks.IRON_BLOCK))                                       { r=210; g=210; b=215; }
             else if (state.is(Blocks.GOLD_BLOCK))                                       { r=255; g=210; b= 50; }
             else if (state.is(Blocks.DIAMOND_BLOCK))                                    { r= 80; g=220; b=215; }
