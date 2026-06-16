@@ -196,22 +196,47 @@ public class LocalizedChunkCapture {
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
 
-        // Angular parallax — door/window model:
-        //   The angle your eye makes through the doorframe = lateralOffset / forwardDist.
-        //   At the destination, shift the virtual eye by that same angle * VIRTUAL_SCREEN_DIST.
-        //   This means: far from portal = small shift, close = large shift. No FOV change.
-        //   parallaxScale from config lets the user tune the strength.
+        // Pure-rotation parallax — "camera on a tripod" model:
+        //   Camera origin stays fixed at destination center.
+        //   The view direction rotates by the angle the player makes through the portal frame:
+        //     yawDelta   = atan2(parallaxRight, forwardDist)   → player right  → camera turns left
+        //     pitchDelta = atan2(parallaxUp,    forwardDist)   → player up     → camera turns down
+        //   No position shift, no FOV change.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-        double forwardDist = Math.max(0.5, parallaxForward); // avoid div/0 when on the portal face
-        double shiftRight = (parallaxRight / forwardDist) * VIRTUAL_SCREEN_DIST * scale;
-        double shiftUp    = (parallaxUp    / forwardDist) * VIRTUAL_SCREEN_DIST * scale;
-        // Clamp so you can't look completely around the corner
-        shiftRight = Math.max(-portalHalfW * 2, Math.min(portalHalfW * 2, shiftRight));
-        shiftUp    = Math.max(-portalHalfH * 2, Math.min(portalHalfH * 2, shiftUp));
+        double forwardDist = Math.max(0.5, parallaxForward);
+        double angleYaw   = Math.atan2(parallaxRight * scale, forwardDist);
+        double anglePitch = Math.atan2(parallaxUp    * scale, forwardDist);
 
-        eyeX += rightX * shiftRight + upX * shiftUp;
-        eyeY +=                       upY * shiftUp;
-        eyeZ += rightZ * shiftRight + upZ * shiftUp;
+        // Rotate fwd/right/up basis by (angleYaw around up-axis, anglePitch around right-axis).
+        // Step 1: yaw rotation around world-up (0,1,0) axis.
+        double cosY = Math.cos(angleYaw),  sinY = Math.sin(angleYaw);
+        double fwdX2 = fwdX * cosY - fwdZ * sinY;
+        double fwdZ2 = fwdX * sinY + fwdZ * cosY;
+        double fwdY2 = fwdY;
+        double rX2   = rightX * cosY - rightZ * sinY;
+        double rZ2   = rightX * sinY + rightZ * cosY;
+
+        // Step 2: pitch rotation around the (already yaw-rotated) right axis.
+        double cosP = Math.cos(anglePitch), sinP = Math.sin(anglePitch);
+        // rotate fwd around right2
+        double fwdX3 = fwdX2 * cosP + (rZ2 * fwdY2 - 0 * fwdZ2) * sinP; // cross(right2, fwd2)
+        // Full cross(right2, fwd2): right2=(rX2,0,rZ2), fwd2=(fwdX2,fwdY2,fwdZ2)
+        double crossX = 0 * fwdZ2 - rZ2 * fwdY2;   // rY=0
+        double crossY = rZ2 * fwdX2 - rX2 * fwdZ2;
+        double crossZ = rX2 * fwdY2 - 0 * fwdX2;
+        fwdX3 = fwdX2 * cosP + crossX * sinP;
+        double fwdY3 = fwdY2 * cosP + crossY * sinP;
+        double fwdZ3 = fwdZ2 * cosP + crossZ * sinP;
+
+        // Recompute up from cross(right2, fwd3) — keeps orthonormal basis
+        double upX3 = 0 * fwdZ3 - rZ2 * fwdY3;
+        double upY3 = rZ2 * fwdX3 - rX2 * fwdZ3;
+        double upZ3 = rX2 * fwdY3 - 0 * fwdX3;
+
+        // Overwrite direction vectors with rotated versions; eye position is unchanged.
+        fwdX = fwdX3; fwdY = fwdY3; fwdZ = fwdZ3;
+        rightX = rX2; rightZ = rZ2;           // rightY stays 0
+        upX = upX3;   upY = upY3; upZ = upZ3;
 
         double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
         double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;
