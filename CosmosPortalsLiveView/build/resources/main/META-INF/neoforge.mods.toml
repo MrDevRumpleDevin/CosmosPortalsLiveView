@@ -1,0 +1,34 @@
+modLoader="javafxmod"
+loaderVersion="[1,)"
+license="MIT"
+
+[[mods]]
+modId="cosmosportals_liveview"
+version="${file.jarVersion}"
+displayName="CosmosPortals Live View"
+displayURL="https://github.com/blackwelld/CosmosPortalsLiveView"
+logoFile="logo.png"
+credits="Blackwell"
+authors="Blackwell"
+description="""Live view portal rendering addon for CosmosPortals. See the destination portal location in real-time."""
+
+[[dependencies.cosmosportals_liveview]]
+    modId="neoforge"
+    mandatory=true
+    versionRange="[20,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.cosmosportals_liveview]]
+    modId="cosmosportals"
+    mandatory=true
+    versionRange="[1,)"
+    ordering="AFTER"
+    side="CLIENT"
+
+[[dependencies.cosmosportals_liveview]]
+    modId="cosmoslibrary"
+    mandatory=true
+    versionRange="[3,)"
+    ordering="AFTER"
+    side="BOTH"
