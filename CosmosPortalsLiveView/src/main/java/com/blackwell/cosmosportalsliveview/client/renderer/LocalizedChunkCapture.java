@@ -4,11 +4,13 @@ import com.blackwell.cosmosportalsliveview.config.PortalLiveViewConfig;
 import com.mojang.blaze3d.platform.NativeImage;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.animal.Animal;
@@ -16,6 +18,7 @@ import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.api.distmarker.Dist;
@@ -121,8 +124,8 @@ public class LocalizedChunkCapture {
         portalData.setCaptureInFlight(true);
 
         // ── Snapshot on main thread ──────────────────────────────────────────
-        final List<EntityDot>     entityDots  = snapshotEntities(sampleLevel, portalData.destPos);
-        final Map<BlockState, Integer> colorMap = snapshotBlockColors(sampleLevel, portalData.destPos);
+        final List<EntityDot>          entityDots = snapshotEntities(sampleLevel, portalData.destPos);
+        final Map<BlockState, int[]>   colorMap   = snapshotBlockColors(sampleLevel, portalData.destPos);
 
         final Level    levelSnap = sampleLevel;
         final int      resWSnap  = resW;
@@ -161,12 +164,14 @@ public class LocalizedChunkCapture {
     // ── Color snapshot (main thread) ───────────────────────────────────────────
 
     /**
-     * Walks a cube of blocks around destPos, samples the particle icon color for each
-     * unique BlockState, and stores state→ARGB in a HashMap.
-     * Must run on the main/render thread (ModelShaper and TextureAtlas are not thread-safe).
+     * Walks a cube of blocks around destPos, samples per-face colors for each unique
+     * BlockState using the block model's quads, and returns state → int[6] ARGB
+     * indexed by Direction.ordinal() (DOWN=0, UP=1, NORTH=2, SOUTH=3, WEST=4, EAST=5).
+     *
+     * Must run on the main/render thread — ModelShaper and TextureAtlas are not thread-safe.
      */
-    private static Map<BlockState, Integer> snapshotBlockColors(Level level, BlockPos center) {
-        Map<BlockState, Integer> map = new HashMap<>();
+    private static Map<BlockState, int[]> snapshotBlockColors(Level level, BlockPos center) {
+        Map<BlockState, int[]> map = new HashMap<>();
         Minecraft mc = Minecraft.getInstance();
 
         int radius = Math.min(MAX_RAY_DIST + 2, 50);
@@ -180,8 +185,11 @@ public class LocalizedChunkCapture {
                     BlockState state = level.getBlockState(bp);
                     if (state.isAir() || map.containsKey(state)) continue;
 
-                    int color = sampleSpriteColor(mc, state, level, bp);
-                    map.put(state, color);
+                    int[] faceColors = new int[6];
+                    for (Direction face : Direction.values()) {
+                        faceColors[face.ordinal()] = sampleFaceColor(mc, state, level, bp, face);
+                    }
+                    map.put(state, faceColors);
                 }
             }
         }
@@ -189,53 +197,68 @@ public class LocalizedChunkCapture {
     }
 
     /**
-     * Samples the average color of a block's particle sprite, optionally tinted
-     * by BlockColors (grass, leaves, water biome tint).
+     * Samples the average color of a specific face of a block, using the BakedModel's
+     * quads for that face. Falls back to particle icon, then to fallbackColor table.
+     * Tint via BlockColors is applied (grass, leaves, water, etc.).
      */
-    private static int sampleSpriteColor(Minecraft mc, BlockState state,
-                                          Level level, BlockPos pos) {
+    private static int sampleFaceColor(Minecraft mc, BlockState state,
+                                        Level level, BlockPos pos, Direction face) {
         try {
-            // Particle sprite from the model (works for vanilla + most modded blocks)
-            TextureAtlasSprite sprite =
-                    mc.getModelManager()
-                      .getBlockModelShaper()
-                      .getBlockModel(state)
-                      .getParticleIcon();
+            RandomSource rand = RandomSource.create(0L);
+            List<BakedQuad> quads = mc.getModelManager()
+                    .getBlockModelShaper()
+                    .getBlockModel(state)
+                    .getQuads(state, face, rand);
 
-            // Average the sprite pixels (they're stored as floats u0–u1, v0–v1
-            // within the 16×16 atlas cell; we sample a 4×4 sub-grid for speed)
+            TextureAtlasSprite sprite = null;
+            int tintIndex = -1;
+
+            if (!quads.isEmpty()) {
+                BakedQuad quad = quads.get(0);
+                sprite = quad.getSprite();
+                tintIndex = quad.isTinted() ? quad.getTintIndex() : -1;
+            }
+
+            // Fall back to particle icon if no quads for this face
+            if (sprite == null) {
+                sprite = mc.getModelManager()
+                        .getBlockModelShaper()
+                        .getBlockModel(state)
+                        .getParticleIcon();
+            }
+
             int rSum = 0, gSum = 0, bSum = 0, n = 0;
             int spriteW = Math.max(1, sprite.contents().width());
             int spriteH = Math.max(1, sprite.contents().height());
 
-            // Sample up to 16 pixels evenly from the sprite
             int samples = Math.min(16, spriteW * spriteH);
             for (int i = 0; i < samples; i++) {
                 int sx = (int)((i % 4) * (spriteW / 4.0));
                 int sy = (int)((i / 4) * (spriteH / 4.0));
-                // getPixel returns 0xAABBGGRR (NativeImage RGBA)
+                // getPixelRGBA returns 0xAABBGGRR (NativeImage ABGR layout)
                 int px = sprite.contents().getOriginalImage().getPixelRGBA(
                         Math.min(sx, spriteW - 1),
                         Math.min(sy, spriteH - 1));
-                // Extract as ARGB
                 int pa = (px >> 24) & 0xFF;
-                if (pa < 10) continue; // skip transparent pixels
-                int pr = (px      ) & 0xFF; // NativeImage is ABGR stored, getPixelRGBA → AABBGGRR
+                if (pa < 10) continue;
+                int pr = (px      ) & 0xFF; // R in ABGR is byte 0
                 int pg = (px >>  8) & 0xFF;
                 int pb = (px >> 16) & 0xFF;
                 rSum += pr; gSum += pg; bSum += pb; n++;
             }
 
-            if (n == 0) return fallbackColor(state); // fully transparent sprite
+            if (n == 0) return fallbackColor(state);
 
             int r = rSum / n, g = gSum / n, b = bSum / n;
 
-            // Apply biome/block tint via BlockColors
-            int tint = mc.getBlockColors().getColor(state, level, pos, 0);
-            if (tint != -1) {
-                r = (r * ((tint >> 16) & 0xFF)) / 255;
-                g = (g * ((tint >>  8) & 0xFF)) / 255;
-                b = (b * ( tint        & 0xFF)) / 255;
+            // Apply biome/block tint
+            if (tintIndex >= 0) {
+                int tint = mc.getBlockColors().getColor(state, level, pos, tintIndex);
+                if (tint != -1) {
+                    r = (r * ((tint >> 16) & 0xFF)) / 255;
+                    g = (g * ((tint >>  8) & 0xFF)) / 255;
+                    b = (b * ( tint        & 0xFF)) / 255;
+                }
             }
 
             return (0xFF << 24) | (r << 16) | (g << 8) | b;
@@ -277,7 +300,7 @@ public class LocalizedChunkCapture {
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       List<EntityDot> entityDots,
-                                                      Map<BlockState, Integer> colorMap) {
+                                                      Map<BlockState, int[]> colorMap) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
         double yawRad   = Math.toRadians(yawDeg);
@@ -406,7 +429,7 @@ public class LocalizedChunkCapture {
                                   double ox, double oy, double oz,
                                   double dx, double dy, double dz,
                                   int[] hit,
-                                  Map<BlockState, Integer> colorMap) {
+                                  Map<BlockState, int[]> colorMap) {
         // Current voxel
         int bx = (int) Math.floor(ox);
         int by = (int) Math.floor(oy);
@@ -458,9 +481,12 @@ public class LocalizedChunkCapture {
             BlockPos bp    = new BlockPos(bx, by, bz);
             BlockState state = level.getBlockState(bp);
 
-            if (!state.isAir() && state.isSolidRender(level, bp)) {
-                // Look up pre-sampled color; fall back to hardcoded table
-                int baseColor = colorMap.getOrDefault(state, fallbackColor(state));
+            if (!state.isAir() && state.getRenderShape() != RenderShape.INVISIBLE) {
+                // Look up per-face pre-sampled color; fall back to hardcoded table
+                int[] faceColors = colorMap.get(state);
+                int baseColor = (faceColors != null)
+                        ? faceColors[hitFace.ordinal()]
+                        : fallbackColor(state);
 
                 // Face-normal AO
                 float ao;
