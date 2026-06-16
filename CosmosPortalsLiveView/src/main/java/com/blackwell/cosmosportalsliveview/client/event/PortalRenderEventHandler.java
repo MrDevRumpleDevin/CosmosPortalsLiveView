@@ -244,7 +244,7 @@ public class PortalRenderEventHandler {
      * Finds the dock block adjacent to this portal block (any direction).
      * Returns the dock's BlockPos, or null if none found.
      */
-    static BlockPos findDockPos(Level level, BlockPos portalPos) {
+    public static BlockPos findDockPos(Level level, BlockPos portalPos) {
         Set<BlockPos> frame = findConnectedPortalBlocks(level, portalPos, 64);
         for (BlockPos fp : frame) {
             for (Direction dir : Direction.values()) {
@@ -260,7 +260,7 @@ public class PortalRenderEventHandler {
     /**
      * Flood-fill to collect all connected CosmosPortal portal blocks starting from {@code origin}.
      */
-    static Set<BlockPos> findConnectedPortalBlocks(Level level, BlockPos origin, int maxBlocks) {
+    public static Set<BlockPos> findConnectedPortalBlocks(Level level, BlockPos origin, int maxBlocks) {
         Set<BlockPos> visited = new HashSet<>();
         Queue<BlockPos> queue = new LinkedList<>();
         queue.add(origin);

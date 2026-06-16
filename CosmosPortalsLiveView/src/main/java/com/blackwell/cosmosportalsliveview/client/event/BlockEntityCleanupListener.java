@@ -1,6 +1,7 @@
 package com.blackwell.cosmosportalsliveview.client.event;
 
 import com.blackwell.cosmosportalsliveview.client.LiveViewState;
+import com.blackwell.cosmosportalsliveview.client.renderer.FboCapture;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalLiveViewManager;
 
 import net.minecraft.core.BlockPos;
@@ -91,6 +92,7 @@ public class BlockEntityCleanupListener {
     public static void onWorldUnload(LevelEvent.Unload event) {
         if (event.getLevel().isClientSide()) {
             PortalLiveViewManager.cleanup();
+            FboCapture.cleanup();
         }
     }
 }

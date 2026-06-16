@@ -1,3 +1,5 @@
+mixins = [{file="cosmosportals_liveview.mixins.json"}]
+
 modLoader="javafml"
 loaderVersion="[47,)"
 
