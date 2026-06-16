@@ -283,7 +283,24 @@ public class PortalRenderEventHandler {
 
     /**
      * Computes the bounding box of the portal frame and renders a single full-size quad.
-     * UV orientation: U goes left→right, V goes bottom→top (matching the raycaster output).
+     *
+     * UV orientation:
+     *   U = 0 → left edge of raycasted image, U = 1 → right edge
+     *   V = 0 → top of image, V = 1 → bottom
+     *
+     * The quad is pushed 0.5 blocks outward along the face normal so it renders
+     * in FRONT of CosmosPortals' translucent colour layer, not sandwiched inside it.
+     * Both sides are pushed outward independently so the view is correct from either
+     * direction.
+     *
+     * UV handedness:
+     *   axis=X (face normal ±Z): raycaster right-vector points +X when player faces
+     *     south, so U=0 maps to -X (left). Quad: BL at x=-halfW → U=0, BR at +halfW → U=1. ✓
+     *
+     *   axis=Z (face normal ±X): raycaster right-vector points +Z when player faces
+     *     west (yaw=90°). Image U=0 = left = -right = -Z. So U=0 → z=-halfW.
+     *     Front face (+X side): BL z=-halfW→U=0, BR z=+halfW→U=1.
+     *     Back face (-X side): BL z=+halfW→U=0, BR z=-halfW→U=1.
      */
     private static void renderPortalFrame(PoseStack poseStack,
                                            MultiBufferSource bufferSource,
@@ -321,6 +338,10 @@ public class PortalRenderEventHandler {
 
         float halfH = (maxY - minY) / 2.0f + 0.5f;
 
+        // Offset the quad this many blocks outward along its face normal so it
+        // renders in front of (not inside) CosmosPortals' colour surface layer.
+        final float FACE_OFFSET = 0.52f;
+
         double camX = camera.getPosition().x;
         double camY = camera.getPosition().y;
         double camZ = camera.getPosition().z;
@@ -332,41 +353,46 @@ public class PortalRenderEventHandler {
         VertexConsumer consumer = bufferSource.getBuffer(renderType);
         Matrix4f matrix = poseStack.last().pose();
 
-        // UV convention: (0,0) = top-left of texture, (1,1) = bottom-right.
-        // Vertex winding: bottom-left → bottom-right → top-right → top-left (counter-clockwise when viewed from front).
-        // Y axis: -halfH = bottom of portal, +halfH = top.
-        // So bottom vertices get V=1 (texture bottom), top vertices get V=0 (texture top).
-        // This matches the raycaster where py=0 is the top row of the image.
-
         if (isXAxis) {
-            // AXIS=X: portal opening along X, visible face normal is ±Z.
+            // ── AXIS=X: portal plane is XY, face normal is ±Z ──────────────────
+            // Horizontal span runs along X.  Player looks ±Z to see the portal.
+            // Raycaster right-vector is ±X when player faces ±Z (yaw=0/180).
+            // U=0 → -X side (left), U=1 → +X side (right). Vertex at -halfW → U=0. ✓
             float halfW = (maxX - minX) / 2.0f + 0.5f;
+            float fz    = FACE_OFFSET; // push front face toward +Z viewer
 
-            // Front face (facing +Z / south) — normal points towards viewer from south
-            // BL, BR, TR, TL with corrected UVs: bottom=V1, top=V0
-            consumer.vertex(matrix, -halfW, -halfH,  0.001f).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
-            consumer.vertex(matrix,  halfW, -halfH,  0.001f).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
-            consumer.vertex(matrix,  halfW,  halfH,  0.001f).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
-            consumer.vertex(matrix, -halfW,  halfH,  0.001f).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
-            // Back face (facing -Z / north)
-            consumer.vertex(matrix,  halfW, -halfH, -0.001f).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
-            consumer.vertex(matrix, -halfW, -halfH, -0.001f).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
-            consumer.vertex(matrix, -halfW,  halfH, -0.001f).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
-            consumer.vertex(matrix,  halfW,  halfH, -0.001f).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
+            // Front face (viewer on +Z side, looking north toward -Z)
+            consumer.vertex(matrix, -halfW, -halfH,  fz).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
+            consumer.vertex(matrix,  halfW, -halfH,  fz).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
+            consumer.vertex(matrix,  halfW,  halfH,  fz).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
+            consumer.vertex(matrix, -halfW,  halfH,  fz).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
+            // Back face (viewer on -Z side, looking south toward +Z)
+            // Mirror U so the image faces the viewer correctly from this side too.
+            consumer.vertex(matrix,  halfW, -halfH, -fz).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
+            consumer.vertex(matrix, -halfW, -halfH, -fz).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
+            consumer.vertex(matrix, -halfW,  halfH, -fz).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
+            consumer.vertex(matrix,  halfW,  halfH, -fz).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
         } else {
-            // AXIS=Z: portal opening along Z, visible face normal is ±X.
+            // ── AXIS=Z: portal plane is ZY, face normal is ±X ──────────────────
+            // Horizontal span runs along Z.  Player looks ±X to see the portal.
+            // Raycaster right-vector is ±Z when player faces ±X (yaw=90°/270°).
+            // When facing west (yaw=90°): rightZ=+1 → image left = -Z.
+            //   So U=0 → z=-halfW,  U=1 → z=+halfW.
             float halfW = (maxZ - minZ) / 2.0f + 0.5f;
+            float fx    = FACE_OFFSET;
 
-            // Front face (facing +X / east)
-            consumer.vertex(matrix,  0.001f, -halfH,  halfW).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  0.001f, -halfH, -halfW).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  0.001f,  halfH, -halfW).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  0.001f,  halfH,  halfW).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            // Back face (facing -X / west)
-            consumer.vertex(matrix, -0.001f, -halfH, -halfW).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -0.001f, -halfH,  halfW).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -0.001f,  halfH,  halfW).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -0.001f,  halfH, -halfW).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            // Front face (viewer on +X side, looking west toward -X)
+            // Image left = -Z, so BL at z=-halfW gets U=0.
+            consumer.vertex(matrix,  fx, -halfH, -halfW).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  fx, -halfH,  halfW).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  fx,  halfH,  halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  fx,  halfH, -halfW).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            // Back face (viewer on -X side, looking east toward +X)
+            // Mirror: image left = +Z, so BL at z=+halfW gets U=0.
+            consumer.vertex(matrix, -fx, -halfH,  halfW).color(255,255,255,255).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -fx, -halfH, -halfW).color(255,255,255,255).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -fx,  halfH, -halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -fx,  halfH,  halfW).color(255,255,255,255).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
         }
 
         poseStack.popPose();
