@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import com.tcn.cosmosportals.core.blockentity.BlockEntityPortal;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
 import net.minecraftforge.api.distmarker.Dist;
@@ -21,10 +22,10 @@ public class PortalLiveViewManager {
     private static final Map<ResourceLocation, Set<BlockPos>> dimensionPortals = new ConcurrentHashMap<>();
     private static final Queue<BlockPos> updateQueue = new ConcurrentLinkedQueue<>();
 
-    /** Called from the tick handler whenever a BlockEntityPortal is found in the level. */
+    /** Called from the chunk-load handler whenever a BlockEntityPortal is found. */
     public static void addPortal(BlockEntityPortal entity, BlockPos pos) {
         if (entity == null) return;
-        if (activePortals.containsKey(pos)) return; // already tracked
+        if (activePortals.containsKey(pos)) return;
 
         PortalViewData data = new PortalViewData(entity, pos);
         activePortals.put(pos, data);
@@ -48,12 +49,12 @@ public class PortalLiveViewManager {
                     LocalizedChunkCapture.captureLocalizedPortalView(data, level);
                     updated++;
                 } catch (Exception e) {
-                    // swallow; no crash risk for render failures
+                    // swallow; never crash the render thread
                 }
             }
         }
 
-        // Re-queue portals that are due for a refresh
+        // Re-queue portals due for refresh
         for (Map.Entry<BlockPos, PortalViewData> entry : activePortals.entrySet()) {
             if (entry.getValue().shouldUpdateCapture(currentTime, captureInterval)) {
                 updateQueue.offer(entry.getKey());
@@ -92,5 +93,20 @@ public class PortalLiveViewManager {
 
     public static boolean isTracked(BlockPos pos) {
         return activePortals.containsKey(pos);
+    }
+
+    /**
+     * Marks all portals adjacent to {@code dockPos} for immediate texture refresh.
+     * Called when the player toggles live view mode in the dock GUI.
+     */
+    public static void markPortalsForDockUpdate(BlockPos dockPos) {
+        for (Direction dir : Direction.values()) {
+            BlockPos adjacent = dockPos.relative(dir);
+            PortalViewData data = activePortals.get(adjacent);
+            if (data != null) {
+                data.markForUpdate();
+                updateQueue.offer(adjacent);
+            }
+        }
     }
 }

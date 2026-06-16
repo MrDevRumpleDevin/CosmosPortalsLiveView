@@ -18,24 +18,35 @@ public class PortalViewData {
     public final ResourceLocation destDimension;
     public final BlockPos destPos;
 
+    /**
+     * Yaw/pitch captured when the player used the unlinked dimension container.
+     * These define the "camera" direction for the live view perspective render.
+     * Yaw: Minecraft convention (0=south, 90=west). Pitch: 0=horizontal, neg=up.
+     */
+    public final float destYaw;
+    public final float destPitch;
+
     private DynamicTexture liveViewTexture;
     private long lastCaptureTime;
 
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
 
-    /**
-     * @param entity    the {@link BlockEntityPortal} this data wraps
-     * @param portalPos the world position of the portal block
-     */
     public PortalViewData(BlockEntityPortal entity, BlockPos portalPos) {
         this.portalPos = portalPos;
-        // Read the actual destination dimension and position from the block entity.
-        // destDimension is a public field; getDestPos() delegates to destInfo.getPos().
         this.destDimension = entity.destDimension;
         BlockPos dp = entity.getDestPos();
-        // Treat BlockPos.ZERO / missing info as null so the capture skips gracefully.
         this.destPos = (dp != null && !dp.equals(BlockPos.ZERO)) ? dp : null;
+
+        // Read the yaw/pitch stored in destInfo (set by the dock from the dimension container).
+        float yaw = 0f, pitch = 0f;
+        try {
+            yaw   = entity.destInfo.getYaw();
+            pitch = entity.destInfo.getPitch();
+        } catch (Exception ignored) {}
+        this.destYaw   = yaw;
+        this.destPitch = pitch;
+
         this.lastCaptureTime = 0;
     }
 
