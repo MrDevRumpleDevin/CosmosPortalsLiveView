@@ -2,6 +2,7 @@ package com.blackwell.cosmosportalsliveview.client.event;
 
 import com.blackwell.cosmosportalsliveview.client.LiveViewState;
 import com.blackwell.cosmosportalsliveview.config.PortalLiveViewConfig;
+import com.blackwell.cosmosportalsliveview.client.renderer.LocalizedChunkCapture;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalLiveViewManager;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalViewData;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -106,14 +107,9 @@ public class PortalRenderEventHandler {
             LiveViewState.load();
         }
 
-        long captureInterval = PortalLiveViewConfig.CAPTURE_INTERVAL_MS.get();
-        int  portalsPerFrame = PortalLiveViewConfig.PORTALS_PER_FRAME.get();
-
-        // Pass player position for proximity culling
+        // Mid-session scan only — captures are now triggered from onLevelRender
+        // so they fire every frame instead of every tick, making the view feel live.
         LocalPlayer player = minecraft.player;
-        Vec3 playerPos = (player != null) ? player.position() : null;
-
-        PortalLiveViewManager.updatePortalsIncremental(level, captureInterval, portalsPerFrame, playerPos, RENDER_DISTANCE_SQ);
 
         // ── Mid-session scan: detect portals placed since world join ──────────
         // ChunkEvent.Load only fires when a chunk first enters the client, not when
@@ -198,6 +194,9 @@ public class PortalRenderEventHandler {
         });
     }
 
+    /** Player eye height above feet — used to normalize parallaxOffsetUp so pey=0 at resting position. */
+    private static final float PLAYER_EYE_HEIGHT = 1.62f;
+
     @SubscribeEvent
     public static void onLevelRender(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_ENTITIES) return;
@@ -212,6 +211,11 @@ public class PortalRenderEventHandler {
         Camera camera = event.getCamera();
         Vec3 camPos = camera.getPosition();
 
+        long currentTime = System.currentTimeMillis();
+        long captureInterval = PortalLiveViewConfig.CAPTURE_INTERVAL_MS.get();
+        int portalsPerFrame = PortalLiveViewConfig.PORTALS_PER_FRAME.get();
+        int capturedThisFrame = 0;
+
         for (PortalViewData data : PortalLiveViewManager.getActivePortals().values()) {
             // Proximity cull rendering too
             BlockPos pp = data.portalPos;
@@ -224,6 +228,17 @@ public class PortalRenderEventHandler {
             BlockPos dockPos = findDockPos(level, data.portalPos);
             if (dockPos == null) continue;
             if (!LiveViewState.isEnabled(dockPos)) continue;
+
+            // ── Per-frame capture trigger (was tick-based — now every frame) ──
+            // This is the key to feeling live: parallax offsets are updated just
+            // above in renderPortalFrame, then we immediately kick a new capture
+            // if the interval has elapsed.  captureAsync is a no-op if one is
+            // already in flight, so there is no pile-up.
+            if (capturedThisFrame < portalsPerFrame
+                    && data.shouldUpdateCapture(currentTime, captureInterval)) {
+                LocalizedChunkCapture.captureAsync(data, level);
+                capturedThisFrame++;
+            }
 
             DynamicTexture texture = data.getTexture();
             if (texture == null) continue;
@@ -395,20 +410,31 @@ public class PortalRenderEventHandler {
         {
             Vec3 camPos3 = camera.getPosition();
             double pex = camPos3.x - centerX;
-            double pey = camPos3.y - centerY;
+            // Normalize Y: subtract eye height so that a player standing at resting
+            // position in front of the portal has pey≈0.  This prevents the camera
+            // from permanently tilting up just because the eye is 1.62 blocks above
+            // the floor while the portal geometric center is at mid-height.
+            // centerY is the vertical mid-point of the portal frame.  A player
+            // standing on the floor in front of a floor-to-ceiling portal that spans
+            // Y=0..2 has centerY=1.5 and camPos3.y = floorY + 1.62 ≈ 1.62,
+            // so raw pey = +0.12 — tiny, fine.  But we still subtract PLAYER_EYE_HEIGHT
+            // so the neutral position (eye at portal centre height) gives exactly 0.
+            double pey = camPos3.y - (centerY + PLAYER_EYE_HEIGHT);
             double pez = camPos3.z - centerZ;
-            // Store raw portal-local offsets (no scale yet — applied in raycaster).
-            // Right/up negated: moving right at source reveals more of the LEFT
-            // side at destination, like looking through a real door.
+            // Raw offsets — no negation here.
+            // The rotation direction is set in renderPerspectiveView:
+            //   positive parallaxRight → player is to the RIGHT of portal centre
+            //   → atan2(+right, fwd) is positive → yaw rotates left (sees more left at dest)
+            //   This matches the expected door/window behaviour.
             //   axis=X (face normal ±Z): right=X, up=Y, forward=Z
             //   axis=Z (face normal ±X): right=Z, up=Y, forward=X
             if (isXAxis) {
-                data.parallaxOffsetRight   = (float)(-pex);
-                data.parallaxOffsetUp      = (float)(-pey);
+                data.parallaxOffsetRight   = (float)(pex);
+                data.parallaxOffsetUp      = (float)(pey);
                 data.parallaxOffsetForward = (float)  Math.abs(pez);
             } else {
-                data.parallaxOffsetRight   = (float)(-pez);
-                data.parallaxOffsetUp      = (float)(-pey);
+                data.parallaxOffsetRight   = (float)(pez);
+                data.parallaxOffsetUp      = (float)(pey);
                 data.parallaxOffsetForward = (float)  Math.abs(pex);
             }
         }

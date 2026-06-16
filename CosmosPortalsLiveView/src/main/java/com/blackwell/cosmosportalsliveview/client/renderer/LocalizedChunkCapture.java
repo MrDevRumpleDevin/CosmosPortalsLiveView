@@ -178,64 +178,74 @@ public class LocalizedChunkCapture {
                                                       List<EntityDot> entityDots) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
-        double yawRad   = Math.toRadians(yawDeg);
-        double pitchRad = Math.toRadians(pitchDeg);
+        double yawRad = Math.toRadians(yawDeg);
+        // Always render horizontally — ignore stored pitch so the baseline view
+        // is always eye-level through the portal, not tilted up/down from when
+        // the portal was linked.
+        // pitchDeg is kept as a parameter for API compatibility but not used here.
 
-        double fwdX = -Math.sin(yawRad) * Math.cos(pitchRad);
-        double fwdY = -Math.sin(pitchRad);
-        double fwdZ =  Math.cos(yawRad) * Math.cos(pitchRad);
+        double fwdX = -Math.sin(yawRad);
+        double fwdY =  0.0;
+        double fwdZ =  Math.cos(yawRad);
 
+        // Eye at portal destination center, at eye height, pushed back by EYE_FORWARD_OFFSET
         double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET;
         double eyeY = eyePos.getY() + 1.62 + fwdY * EYE_FORWARD_OFFSET;
         double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET;
 
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
+        // rightY = 0 (always horizontal)
 
-        double upX = -rightZ * fwdY;
-        double upY =  rightZ * fwdX - rightX * fwdZ;
-        double upZ =  rightX * fwdY;
+        // up is always world-up when pitch=0
+        double upX = 0.0;
+        double upY = 1.0;
+        double upZ = 0.0;
 
-        // Pure-rotation parallax — "camera on a tripod" model:
-        //   Camera origin stays fixed at destination center.
-        //   The view direction rotates by the angle the player makes through the portal frame:
-        //     yawDelta   = atan2(parallaxRight, forwardDist)   → player right  → camera turns left
-        //     pitchDelta = atan2(parallaxUp,    forwardDist)   → player up     → camera turns down
-        //   No position shift, no FOV change.
+        // ── Pure-rotation parallax — "camera on a tripod" model ────────────────
+        // Camera origin stays fixed. View direction rotates by the angle the player
+        // makes when viewed through the portal frame — exactly like peering through
+        // a window from an angle.
+        //
+        //   parallaxRight > 0  →  player is to the RIGHT of portal centre
+        //                      →  angleYaw is positive
+        //                      →  we negate it so the camera turns LEFT (sees the
+        //                         left side of the destination room)  ← door logic
+        //
+        //   parallaxUp > 0     →  player eye is ABOVE portal centre
+        //                      →  anglePitch positive → negate → camera tilts DOWN
+        //
+        // Scale from config lets the player tune the strength.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
         double forwardDist = Math.max(0.5, parallaxForward);
-        double angleYaw   = Math.atan2(parallaxRight * scale, forwardDist);
-        double anglePitch = Math.atan2(parallaxUp    * scale, forwardDist);
+        double angleYaw   = -Math.atan2(parallaxRight * scale, forwardDist);
+        double anglePitch = -Math.atan2(parallaxUp    * scale, forwardDist);
 
-        // Rotate fwd/right/up basis by (angleYaw around up-axis, anglePitch around right-axis).
-        // Step 1: yaw rotation around world-up (0,1,0) axis.
-        double cosY = Math.cos(angleYaw),  sinY = Math.sin(angleYaw);
+        // Step 1: yaw rotation around world-up (0,1,0).
+        double cosY = Math.cos(angleYaw), sinY = Math.sin(angleYaw);
         double fwdX2 = fwdX * cosY - fwdZ * sinY;
         double fwdZ2 = fwdX * sinY + fwdZ * cosY;
-        double fwdY2 = fwdY;
+        double fwdY2 = fwdY; // 0
         double rX2   = rightX * cosY - rightZ * sinY;
         double rZ2   = rightX * sinY + rightZ * cosY;
 
-        // Step 2: pitch rotation around the (already yaw-rotated) right axis.
+        // Step 2: pitch rotation around the (yaw-rotated) right axis.
+        // cross(right2, fwd2): right2=(rX2,0,rZ2), fwd2=(fwdX2,0,fwdZ2) — fwdY2=0
         double cosP = Math.cos(anglePitch), sinP = Math.sin(anglePitch);
-        // rotate fwd around right2
-        double fwdX3 = fwdX2 * cosP + (rZ2 * fwdY2 - 0 * fwdZ2) * sinP; // cross(right2, fwd2)
-        // Full cross(right2, fwd2): right2=(rX2,0,rZ2), fwd2=(fwdX2,fwdY2,fwdZ2)
-        double crossX = 0 * fwdZ2 - rZ2 * fwdY2;   // rY=0
-        double crossY = rZ2 * fwdX2 - rX2 * fwdZ2;
-        double crossZ = rX2 * fwdY2 - 0 * fwdX2;
-        fwdX3 = fwdX2 * cosP + crossX * sinP;
+        double crossX = -rZ2 * fwdY2;               // = 0 when fwdY2=0
+        double crossY =  rZ2 * fwdX2 - rX2 * fwdZ2;
+        double crossZ =  rX2 * fwdY2;               // = 0 when fwdY2=0
+        double fwdX3 = fwdX2 * cosP + crossX * sinP;
         double fwdY3 = fwdY2 * cosP + crossY * sinP;
         double fwdZ3 = fwdZ2 * cosP + crossZ * sinP;
 
-        // Recompute up from cross(right2, fwd3) — keeps orthonormal basis
-        double upX3 = 0 * fwdZ3 - rZ2 * fwdY3;
-        double upY3 = rZ2 * fwdX3 - rX2 * fwdZ3;
-        double upZ3 = rX2 * fwdY3 - 0 * fwdX3;
+        // Recompute up = cross(right2, fwd3) to keep orthonormal basis.
+        double upX3 =               -rZ2 * fwdY3;
+        double upY3 =  rZ2 * fwdX3 - rX2 * fwdZ3;
+        double upZ3 =  rX2 * fwdY3;
 
-        // Overwrite direction vectors with rotated versions; eye position is unchanged.
         fwdX = fwdX3; fwdY = fwdY3; fwdZ = fwdZ3;
-        rightX = rX2; rightZ = rZ2;           // rightY stays 0
+        rightX = rX2; rightZ = rZ2;
         upX = upX3;   upY = upY3; upZ = upZ3;
 
         double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
