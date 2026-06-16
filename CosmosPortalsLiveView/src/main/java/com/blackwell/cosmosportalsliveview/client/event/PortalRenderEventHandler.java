@@ -234,7 +234,7 @@ public class PortalRenderEventHandler {
                     texture
             );
 
-            renderPortalFrame(poseStack, bufferSource, data, texLoc, camera, level);
+            renderPortalFrame(poseStack, bufferSource, data, texLoc, camera, level, dockPos);
         }
 
         bufferSource.endBatch();
@@ -307,7 +307,8 @@ public class PortalRenderEventHandler {
                                            PortalViewData data,
                                            ResourceLocation textureLocation,
                                            Camera camera,
-                                           Level level) {
+                                           Level level,
+                                           BlockPos dockPos) {
         Set<BlockPos> frameBlocks = findConnectedPortalBlocks(level, data.portalPos, 64);
         if (frameBlocks.isEmpty()) return;
 
@@ -338,9 +339,11 @@ public class PortalRenderEventHandler {
 
         float halfH = (maxY - minY) / 2.0f + 0.5f;
 
-        // Offset the quad this many blocks outward along its face normal so it
-        // renders in front of (not inside) CosmosPortals' colour surface layer.
-        final float FACE_OFFSET = 0.52f;
+        // Base offset: -0.52 pushes the quad inward (toward the player's side of the portal,
+        // in front of CosmosPortals' color layer). Negative = toward player based on the
+        // previous test where +0.52 went away from the player.
+        // The per-dock offset (cycled with sneak+right-click wand) is added on top.
+        final float FACE_OFFSET = -0.52f + LiveViewState.getOffset(dockPos);
 
         double camX = camera.getPosition().x;
         double camY = camera.getPosition().y;

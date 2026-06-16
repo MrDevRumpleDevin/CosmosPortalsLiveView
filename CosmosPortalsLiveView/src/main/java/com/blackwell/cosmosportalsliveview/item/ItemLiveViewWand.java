@@ -32,14 +32,12 @@ public class ItemLiveViewWand extends Item {
         Player player = context.getPlayer();
         BlockPos clickedPos = context.getClickedPos();
 
-        // Only fire on client; only when sneaking
         if (!level.isClientSide()) return InteractionResult.SUCCESS;
-        if (player == null || !player.isShiftKeyDown()) return InteractionResult.PASS;
+        if (player == null) return InteractionResult.PASS;
 
         BlockState state = level.getBlockState(clickedPos);
         if (!(state.getBlock() instanceof BlockPortal)) return InteractionResult.PASS;
 
-        // Find the controlling dock
         BlockPos dockPos = findDockPos(level, clickedPos);
         if (dockPos == null) {
             player.displayClientMessage(
@@ -49,14 +47,25 @@ public class ItemLiveViewWand extends Item {
             return InteractionResult.FAIL;
         }
 
-        boolean nowEnabled = LiveViewState.toggle(dockPos);
-
-        player.displayClientMessage(
-                Component.literal("[LiveView] Live View: ")
-                        .append(Component.literal(nowEnabled ? "ON" : "OFF")
-                                .withStyle(nowEnabled ? ChatFormatting.GREEN : ChatFormatting.GRAY)),
-                true
-        );
+        if (player.isShiftKeyDown()) {
+            // Sneak + right-click: cycle the quad offset
+            float newOffset = LiveViewState.cycleOffset(dockPos);
+            player.displayClientMessage(
+                    Component.literal("[LiveView] Quad offset: ")
+                            .append(Component.literal(String.format("%.1f", newOffset))
+                                    .withStyle(ChatFormatting.YELLOW)),
+                    true
+            );
+        } else {
+            // Right-click: toggle live view on/off
+            boolean nowEnabled = LiveViewState.toggle(dockPos);
+            player.displayClientMessage(
+                    Component.literal("[LiveView] Live View: ")
+                            .append(Component.literal(nowEnabled ? "ON" : "OFF")
+                                    .withStyle(nowEnabled ? ChatFormatting.GREEN : ChatFormatting.GRAY)),
+                    true
+            );
+        }
 
         return InteractionResult.SUCCESS;
     }
