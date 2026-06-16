@@ -2,6 +2,7 @@ package com.blackwell.cosmosportalsliveview.client.renderer;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.tcn.cosmosportals.core.blockentity.BlockEntityPortal;
 
@@ -31,6 +32,9 @@ public class PortalViewData {
 
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
+
+    /** True while a background capture is in progress — prevents duplicate submissions. */
+    private final AtomicBoolean captureInFlight = new AtomicBoolean(false);
 
     public PortalViewData(BlockEntityPortal entity, BlockPos portalPos) {
         this.portalPos = portalPos;
@@ -77,5 +81,13 @@ public class PortalViewData {
 
     public void markForUpdate() {
         this.needsUpdate = true;
+    }
+
+    public boolean isCaptureInFlight() {
+        return captureInFlight.get();
+    }
+
+    public void setCaptureInFlight(boolean inFlight) {
+        captureInFlight.set(inFlight);
     }
 }

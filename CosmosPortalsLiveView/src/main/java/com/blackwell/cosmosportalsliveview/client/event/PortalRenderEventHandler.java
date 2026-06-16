@@ -14,6 +14,7 @@ import com.tcn.cosmosportals.core.blockentity.AbstractBlockEntityPortalDock;
 
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.DynamicTexture;
@@ -25,6 +26,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -32,6 +34,7 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.level.ChunkEvent;
+import net.minecraftforge.event.level.LevelEvent;
 
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -41,6 +44,23 @@ import java.util.Set;
 @Mod.EventBusSubscriber(modid = "cosmosportals_liveview", bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 @OnlyIn(Dist.CLIENT)
 public class PortalRenderEventHandler {
+
+    /** Only update portals within this many blocks of the player. */
+    private static final double RENDER_DISTANCE_SQ = 64.0 * 64.0; // 64 block radius
+
+    /**
+     * When the client level finishes loading, restore saved live-view state.
+     */
+    @SubscribeEvent
+    public static void onLevelLoad(LevelEvent.Load event) {
+        if (event.getLevel().isClientSide()) {
+            // Defer slightly so Minecraft.getInstance().getSingleplayerServer() is ready.
+            // We use a flag checked on first tick instead.
+            pendingLoad = true;
+        }
+    }
+
+    private static boolean pendingLoad = false;
 
     /**
      * When a chunk loads, scan it for portal block entities to register.
@@ -71,10 +91,20 @@ public class PortalRenderEventHandler {
         Level level = minecraft.level;
         if (level == null) return;
 
+        // Load saved state on first tick after world join
+        if (pendingLoad) {
+            pendingLoad = false;
+            LiveViewState.load();
+        }
+
         long captureInterval = PortalLiveViewConfig.CAPTURE_INTERVAL_MS.get();
         int  portalsPerFrame = PortalLiveViewConfig.PORTALS_PER_FRAME.get();
 
-        PortalLiveViewManager.updatePortalsIncremental(level, captureInterval, portalsPerFrame);
+        // Pass player position for proximity culling
+        LocalPlayer player = minecraft.player;
+        Vec3 playerPos = (player != null) ? player.position() : null;
+
+        PortalLiveViewManager.updatePortalsIncremental(level, captureInterval, portalsPerFrame, playerPos, RENDER_DISTANCE_SQ);
     }
 
     @SubscribeEvent
@@ -89,8 +119,16 @@ public class PortalRenderEventHandler {
         PoseStack poseStack = event.getPoseStack();
         MultiBufferSource.BufferSource bufferSource = minecraft.renderBuffers().bufferSource();
         Camera camera = event.getCamera();
+        Vec3 camPos = camera.getPosition();
 
         for (PortalViewData data : PortalLiveViewManager.getActivePortals().values()) {
+            // Proximity cull rendering too
+            BlockPos pp = data.portalPos;
+            double dx = pp.getX() + 0.5 - camPos.x;
+            double dy = pp.getY() + 0.5 - camPos.y;
+            double dz = pp.getZ() + 0.5 - camPos.z;
+            if (dx*dx + dy*dy + dz*dz > RENDER_DISTANCE_SQ) continue;
+
             // Only render if the controlling dock has live view enabled
             BlockPos dockPos = findDockPos(level, data.portalPos);
             if (dockPos == null) continue;
@@ -114,9 +152,7 @@ public class PortalRenderEventHandler {
      * Finds the dock block adjacent to this portal block (any direction).
      * Returns the dock's BlockPos, or null if none found.
      */
-    private static BlockPos findDockPos(Level level, BlockPos portalPos) {
-        // Search the full portal shape first (find all connected portal blocks),
-        // then check adjacency of the whole frame for a dock.
+    static BlockPos findDockPos(Level level, BlockPos portalPos) {
         Set<BlockPos> frame = findConnectedPortalBlocks(level, portalPos, 64);
         for (BlockPos fp : frame) {
             for (Direction dir : Direction.values()) {
@@ -131,9 +167,8 @@ public class PortalRenderEventHandler {
 
     /**
      * Flood-fill to collect all connected CosmosPortal portal blocks starting from {@code origin}.
-     * Limits search to {@code maxBlocks} to avoid runaway on broken frames.
      */
-    private static Set<BlockPos> findConnectedPortalBlocks(Level level, BlockPos origin, int maxBlocks) {
+    static Set<BlockPos> findConnectedPortalBlocks(Level level, BlockPos origin, int maxBlocks) {
         Set<BlockPos> visited = new HashSet<>();
         Queue<BlockPos> queue = new LinkedList<>();
         queue.add(origin);
@@ -141,7 +176,6 @@ public class PortalRenderEventHandler {
 
         while (!queue.isEmpty() && visited.size() < maxBlocks) {
             BlockPos current = queue.poll();
-            // Only spread horizontally and vertically (portal blocks form a flat frame)
             for (Direction dir : Direction.values()) {
                 BlockPos next = current.relative(dir);
                 if (visited.contains(next)) continue;
@@ -157,7 +191,7 @@ public class PortalRenderEventHandler {
 
     /**
      * Computes the bounding box of the portal frame and renders a single full-size quad.
-     * The quad is oriented based on the portal block's AXIS block state property.
+     * UV orientation: U goes left→right, V goes bottom→top (matching the raycaster output).
      */
     private static void renderPortalFrame(PoseStack poseStack,
                                            MultiBufferSource bufferSource,
@@ -165,7 +199,6 @@ public class PortalRenderEventHandler {
                                            ResourceLocation textureLocation,
                                            Camera camera,
                                            Level level) {
-        // Find all portal blocks in this frame
         Set<BlockPos> frameBlocks = findConnectedPortalBlocks(level, data.portalPos, 64);
         if (frameBlocks.isEmpty()) return;
 
@@ -181,7 +214,6 @@ public class PortalRenderEventHandler {
             maxZ = Math.max(maxZ, bp.getZ());
         }
 
-        // Determine axis from the block state of our portal block
         BlockState portalState = level.getBlockState(data.portalPos);
         boolean isXAxis = false;
         try {
@@ -191,14 +223,11 @@ public class PortalRenderEventHandler {
             }
         } catch (Exception ignored) {}
 
-        // Center of the frame in world space
         double centerX = (minX + maxX) / 2.0 + 0.5;
         double centerY = (minY + maxY) / 2.0 + 0.5;
         double centerZ = (minZ + maxZ) / 2.0 + 0.5;
 
-        // Half-extents: the portal fills its blocks edge-to-edge
-        float halfW; // horizontal half-width of the quad
-        float halfH = (maxY - minY) / 2.0f + 0.5f; // vertical half-height
+        float halfH = (maxY - minY) / 2.0f + 0.5f;
 
         double camX = camera.getPosition().x;
         double camY = camera.getPosition().y;
@@ -211,39 +240,41 @@ public class PortalRenderEventHandler {
         VertexConsumer consumer = bufferSource.getBuffer(renderType);
         Matrix4f matrix = poseStack.last().pose();
 
+        // UV convention: (0,0) = top-left of texture, (1,1) = bottom-right.
+        // Vertex winding: bottom-left → bottom-right → top-right → top-left (counter-clockwise when viewed from front).
+        // Y axis: -halfH = bottom of portal, +halfH = top.
+        // So bottom vertices get V=1 (texture bottom), top vertices get V=0 (texture top).
+        // This matches the raycaster where py=0 is the top row of the image.
+
         if (isXAxis) {
-            // Portal faces East-West (X axis) — the flat face is the X plane, normal along Z
-            // But CosmosPortals AXIS=X means the portal opening is along X (players walk through Z),
-            // so the visible face is perpendicular to Z.
-            // Actually in BlockPortal: X_AXIS_AABB is (0,0,6,16,16,10) — thin slab along Z at center.
-            // So AXIS=X portals face the Z direction (you see them from north/south).
-            halfW = (maxX - minX) / 2.0f + 0.5f;
-            // Quad in the XY plane (facing ±Z), offset 0.001 towards viewer
-            // Front face (facing -Z / north)
+            // AXIS=X: portal opening along X, visible face normal is ±Z.
+            float halfW = (maxX - minX) / 2.0f + 0.5f;
+
+            // Front face (facing +Z / south) — normal points towards viewer from south
+            // BL, BR, TR, TL with corrected UVs: bottom=V1, top=V0
             consumer.vertex(matrix, -halfW, -halfH,  0.001f).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
             consumer.vertex(matrix,  halfW, -halfH,  0.001f).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
             consumer.vertex(matrix,  halfW,  halfH,  0.001f).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
             consumer.vertex(matrix, -halfW,  halfH,  0.001f).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,1).endVertex();
-            // Back face (facing +Z / south)
+            // Back face (facing -Z / north)
             consumer.vertex(matrix,  halfW, -halfH, -0.001f).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
             consumer.vertex(matrix, -halfW, -halfH, -0.001f).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
             consumer.vertex(matrix, -halfW,  halfH, -0.001f).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
             consumer.vertex(matrix,  halfW,  halfH, -0.001f).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(0,0,-1).endVertex();
         } else {
-            // Portal faces North-South (Z axis) — visible face is the Z plane, normal along X.
-            // AXIS=Z means thin slab in the Z direction; face visible from east/west (±X).
-            halfW = (maxZ - minZ) / 2.0f + 0.5f;
-            // Quad in the ZY plane (facing ±X)
-            // Front face (facing -X / west)
-            consumer.vertex(matrix,  0.001f, -halfH, -halfW).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  0.001f, -halfH,  halfW).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  0.001f,  halfH,  halfW).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            consumer.vertex(matrix,  0.001f,  halfH, -halfW).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
-            // Back face (facing +X / east)
-            consumer.vertex(matrix, -0.001f, -halfH,  halfW).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -0.001f, -halfH, -halfW).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -0.001f,  halfH, -halfW).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
-            consumer.vertex(matrix, -0.001f,  halfH,  halfW).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            // AXIS=Z: portal opening along Z, visible face normal is ±X.
+            float halfW = (maxZ - minZ) / 2.0f + 0.5f;
+
+            // Front face (facing +X / east)
+            consumer.vertex(matrix,  0.001f, -halfH,  halfW).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  0.001f, -halfH, -halfW).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  0.001f,  halfH, -halfW).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            consumer.vertex(matrix,  0.001f,  halfH,  halfW).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(1,0,0).endVertex();
+            // Back face (facing -X / west)
+            consumer.vertex(matrix, -0.001f, -halfH, -halfW).color(255,255,255,230).uv(0f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -0.001f, -halfH,  halfW).color(255,255,255,230).uv(1f,1f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -0.001f,  halfH,  halfW).color(255,255,255,230).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
+            consumer.vertex(matrix, -0.001f,  halfH, -halfW).color(255,255,255,230).uv(0f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
         }
 
         poseStack.popPose();

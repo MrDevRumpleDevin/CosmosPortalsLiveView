@@ -14,8 +14,6 @@ import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
 
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -51,8 +49,7 @@ public class ItemLiveViewWand extends Item {
             return InteractionResult.FAIL;
         }
 
-        LiveViewState.toggle(dockPos);
-        boolean nowEnabled = LiveViewState.isEnabled(dockPos);
+        boolean nowEnabled = LiveViewState.toggle(dockPos);
 
         player.displayClientMessage(
                 Component.literal("[LiveView] Live View: ")
@@ -67,7 +64,7 @@ public class ItemLiveViewWand extends Item {
     /**
      * Flood-fill connected portal blocks, then check adjacent blocks for a dock BE.
      */
-    private static BlockPos findDockPos(Level level, BlockPos portalPos) {
+    public static BlockPos findDockPos(Level level, BlockPos portalPos) {
         Set<BlockPos> frame = findConnectedPortalBlocks(level, portalPos, 64);
         for (BlockPos fp : frame) {
             for (Direction dir : Direction.values()) {
@@ -80,7 +77,7 @@ public class ItemLiveViewWand extends Item {
         return null;
     }
 
-    private static Set<BlockPos> findConnectedPortalBlocks(Level level, BlockPos origin, int maxBlocks) {
+    public static Set<BlockPos> findConnectedPortalBlocks(Level level, BlockPos origin, int maxBlocks) {
         Set<BlockPos> visited = new HashSet<>();
         Queue<BlockPos> queue = new LinkedList<>();
         queue.add(origin);
@@ -91,8 +88,8 @@ public class ItemLiveViewWand extends Item {
             for (Direction dir : Direction.values()) {
                 BlockPos next = current.relative(dir);
                 if (visited.contains(next)) continue;
-                BlockState state = level.getBlockState(next);
-                if (state.getBlock() instanceof BlockPortal) {
+                BlockState nextState = level.getBlockState(next);
+                if (nextState.getBlock() instanceof BlockPortal) {
                     visited.add(next);
                     queue.add(next);
                 }

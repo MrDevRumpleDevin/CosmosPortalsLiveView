@@ -13,6 +13,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
@@ -36,25 +37,44 @@ public class PortalLiveViewManager {
         updateQueue.offer(pos);
     }
 
-    public static void updatePortalsIncremental(Level level, long captureInterval, int portalsPerFrame) {
+    /**
+     * Incremental update — only captures portals that are within render distance of the player
+     * and have live view enabled. Captures happen on a background thread to avoid frame stutter.
+     *
+     * @param playerPos      current player position (nullable; if null, no distance culling)
+     * @param maxDistanceSq  squared block distance cutoff
+     */
+    public static void updatePortalsIncremental(Level level, long captureInterval,
+                                                 int portalsPerFrame,
+                                                 Vec3 playerPos, double maxDistanceSq) {
         int updated = 0;
         long currentTime = System.currentTimeMillis();
 
         while (!updateQueue.isEmpty() && updated < portalsPerFrame) {
             BlockPos pos = updateQueue.poll();
             PortalViewData data = activePortals.get(pos);
+            if (data == null) continue;
 
-            if (data != null && data.shouldUpdateCapture(currentTime, captureInterval)) {
-                try {
-                    LocalizedChunkCapture.captureLocalizedPortalView(data, level);
-                    updated++;
-                } catch (Exception e) {
-                    // swallow; never crash the render thread
-                }
+            // Proximity cull — skip if player is too far away
+            if (playerPos != null) {
+                double dx = pos.getX() + 0.5 - playerPos.x;
+                double dy = pos.getY() + 0.5 - playerPos.y;
+                double dz = pos.getZ() + 0.5 - playerPos.z;
+                if (dx*dx + dy*dy + dz*dz > maxDistanceSq) continue;
+            }
+
+            if (data.shouldUpdateCapture(currentTime, captureInterval)) {
+                // Capture on background thread — pass a snapshot of the level reference.
+                // NativeImage allocation and pixel fill happen off the main thread;
+                // DynamicTexture.upload() is called back on the render thread via markDirty().
+                final Level levelSnap = level;
+                final PortalViewData dataSnap = data;
+                LocalizedChunkCapture.captureAsync(dataSnap, levelSnap);
+                updated++;
             }
         }
 
-        // Re-queue portals due for refresh
+        // Re-queue portals due for refresh (proximity check deferred to next poll)
         for (Map.Entry<BlockPos, PortalViewData> entry : activePortals.entrySet()) {
             if (entry.getValue().shouldUpdateCapture(currentTime, captureInterval)) {
                 updateQueue.offer(entry.getKey());
@@ -95,10 +115,6 @@ public class PortalLiveViewManager {
         return activePortals.containsKey(pos);
     }
 
-    /**
-     * Marks all portals adjacent to {@code dockPos} for immediate texture refresh.
-     * Called when the player toggles live view mode in the dock GUI.
-     */
     public static void markPortalsForDockUpdate(BlockPos dockPos) {
         for (Direction dir : Direction.values()) {
             BlockPos adjacent = dockPos.relative(dir);
