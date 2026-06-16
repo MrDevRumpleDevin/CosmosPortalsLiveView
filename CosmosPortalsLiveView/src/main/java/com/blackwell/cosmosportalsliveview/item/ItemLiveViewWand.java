@@ -1,8 +1,11 @@
 package com.blackwell.cosmosportalsliveview.item;
 
 import com.blackwell.cosmosportalsliveview.client.LiveViewState;
+import com.blackwell.cosmosportalsliveview.client.renderer.PortalLiveViewManager;
+import com.blackwell.cosmosportalsliveview.client.renderer.PortalViewData;
 import com.tcn.cosmosportals.core.block.BlockPortal;
 import com.tcn.cosmosportals.core.blockentity.AbstractBlockEntityPortalDock;
+import com.tcn.cosmosportals.core.blockentity.BlockEntityPortal;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -65,6 +68,56 @@ public class ItemLiveViewWand extends Item {
                                     .withStyle(nowEnabled ? ChatFormatting.GREEN : ChatFormatting.GRAY)),
                     true
             );
+
+            // Debug: print raw destPos, raw getYaw/getPitch, and the swapped values
+            // used by PortalViewData (i.e., what the raycaster actually uses).
+            try {
+                BlockEntity dockBe = level.getBlockEntity(dockPos);
+                // Find the portal BE for this dock to read raw destInfo
+                BlockEntityPortal portalBe = null;
+                outer:
+                for (BlockPos fp : findConnectedPortalBlocks(level, clickedPos, 64)) {
+                    BlockEntity be = level.getBlockEntity(fp);
+                    if (be instanceof BlockEntityPortal portal) {
+                        portalBe = portal;
+                        break outer;
+                    }
+                }
+                if (portalBe != null) {
+                    BlockPos rawDest = portalBe.getDestPos();
+                    float rawGetYaw   = portalBe.destInfo.getYaw();   // contains actual PITCH
+                    float rawGetPitch = portalBe.destInfo.getPitch(); // contains actual YAW
+                    // After the swap fix: destYaw=getPitch(), destPitch=getYaw()
+                    float usedYaw   = rawGetPitch; // what raycaster uses as yaw
+                    float usedPitch = rawGetYaw;   // what raycaster uses as pitch
+
+                    // Look up from PortalViewData for the actual used values
+                    PortalViewData pvd = PortalLiveViewManager.getActivePortals().get(clickedPos);
+
+                    player.sendSystemMessage(Component.literal(
+                        String.format("[LiveView DEBUG] destPos=%s  dim=%s",
+                            rawDest, portalBe.destDimension)
+                    ).withStyle(ChatFormatting.AQUA));
+                    player.sendSystemMessage(Component.literal(
+                        String.format("[LiveView DEBUG] raw getYaw()=%.1f  raw getPitch()=%.1f",
+                            rawGetYaw, rawGetPitch)
+                    ).withStyle(ChatFormatting.GRAY));
+                    player.sendSystemMessage(Component.literal(
+                        String.format("[LiveView DEBUG] used yaw=%.1f  used pitch=%.1f  (after swap fix)",
+                            usedYaw, usedPitch)
+                    ).withStyle(ChatFormatting.GREEN));
+                    if (pvd != null) {
+                        player.sendSystemMessage(Component.literal(
+                            String.format("[LiveView DEBUG] PortalViewData: destYaw=%.1f  destPitch=%.1f",
+                                pvd.destYaw, pvd.destPitch)
+                        ).withStyle(ChatFormatting.YELLOW));
+                    }
+                }
+            } catch (Exception debugEx) {
+                player.sendSystemMessage(Component.literal(
+                    "[LiveView DEBUG] error: " + debugEx.getMessage()
+                ).withStyle(ChatFormatting.RED));
+            }
         }
 
         return InteractionResult.SUCCESS;
