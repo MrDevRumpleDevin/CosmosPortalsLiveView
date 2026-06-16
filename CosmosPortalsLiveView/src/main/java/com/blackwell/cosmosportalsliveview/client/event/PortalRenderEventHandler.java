@@ -33,6 +33,7 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.level.BlockEvent;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.event.level.LevelEvent;
 
@@ -40,6 +41,7 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Queue;
 import java.util.Set;
+import java.util.Map;
 
 @Mod.EventBusSubscriber(modid = "cosmosportals_liveview", bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 @OnlyIn(Dist.CLIENT)
@@ -47,6 +49,13 @@ public class PortalRenderEventHandler {
 
     /** Only update portals within this many blocks of the player. */
     private static final double RENDER_DISTANCE_SQ = 64.0 * 64.0; // 64 block radius
+
+    /**
+     * Ticks between full mid-session scans for newly placed portal block entities.
+     * We scan all loaded chunks every N ticks to catch portals placed without a chunk reload.
+     */
+    private static final int MID_SESSION_SCAN_INTERVAL = 40; // ~2 seconds
+    private static int midSessionScanCountdown = MID_SESSION_SCAN_INTERVAL;
 
     /**
      * When the client level finishes loading, restore saved live-view state.
@@ -105,6 +114,88 @@ public class PortalRenderEventHandler {
         Vec3 playerPos = (player != null) ? player.position() : null;
 
         PortalLiveViewManager.updatePortalsIncremental(level, captureInterval, portalsPerFrame, playerPos, RENDER_DISTANCE_SQ);
+
+        // ── Mid-session scan: detect portals placed since world join ──────────
+        // ChunkEvent.Load only fires when a chunk first enters the client, not when
+        // a portal BE is placed into an already-loaded chunk. We periodically walk
+        // all loaded chunk block entities to catch newly placed portals.
+        midSessionScanCountdown--;
+        if (midSessionScanCountdown <= 0) {
+            midSessionScanCountdown = MID_SESSION_SCAN_INTERVAL;
+            scanLoadedChunksForNewPortals(level, player);
+        }
+    }
+
+    /**
+     * Walks every loaded chunk's block entity list, registers any untracked
+     * {@link BlockEntityPortal} instances, and prunes stale portal tracking.
+     */
+    private static void scanLoadedChunksForNewPortals(Level level, LocalPlayer player) {
+        if (level == null) return;
+        try {
+            // Iterate loaded chunks via ClientChunkCache. We access it through the
+            // client chunk source, which has a public getChunk() we can use after
+            // finding the range of loaded chunks around the player.
+            net.minecraft.client.multiplayer.ClientLevel clientLevel =
+                    (net.minecraft.client.multiplayer.ClientLevel) level;
+            net.minecraft.client.multiplayer.ClientChunkCache chunkCache =
+                    clientLevel.getChunkSource();
+
+            // Determine the chunk range to scan (player ± render distance).
+            int scanRadius = Math.min(Minecraft.getInstance().options.renderDistance().get(), 8);
+            int playerChunkX = player != null ? (int) player.getX() >> 4 : 0;
+            int playerChunkZ = player != null ? (int) player.getZ() >> 4 : 0;
+
+            for (int cx = playerChunkX - scanRadius; cx <= playerChunkX + scanRadius; cx++) {
+                for (int cz = playerChunkZ - scanRadius; cz <= playerChunkZ + scanRadius; cz++) {
+                    net.minecraft.world.level.chunk.LevelChunk chunk =
+                            chunkCache.getChunk(cx, cz, net.minecraft.world.level.chunk.ChunkStatus.FULL, false);
+                    if (chunk == null) continue;
+
+                    for (BlockEntity be : chunk.getBlockEntities().values()) {
+                        if (!(be instanceof BlockEntityPortal portal)) continue;
+                        BlockPos pos = be.getBlockPos();
+                        if (!PortalLiveViewManager.isTracked(pos)) {
+                            PortalLiveViewManager.addPortal(portal, pos);
+                        }
+                    }
+                }
+            }
+
+            // Prune stale tracking: if a portal BE no longer exists at the tracked pos, remove it.
+            for (BlockPos tracked : new java.util.ArrayList<>(
+                    PortalLiveViewManager.getActivePortals().keySet())) {
+                BlockEntity be = level.getBlockEntity(tracked);
+                if (!(be instanceof BlockEntityPortal)) {
+                    PortalLiveViewManager.removePortal(tracked);
+                }
+            }
+
+        } catch (Exception ignored) {
+            // Silently skip — chunk-load path covers the normal case.
+        }
+    }
+
+    /**
+     * When a block is placed (EntityPlaceEvent fires on both sides — we filter client),
+     * immediately check if it is a portal block entity and register it.
+     */
+    @SubscribeEvent
+    public static void onBlockPlaced(BlockEvent.EntityPlaceEvent event) {
+        if (!event.getLevel().isClientSide()) return;
+        if (!PortalLiveViewConfig.ENABLE_LIVE_VIEW.get()) return;
+        BlockPos pos = event.getPos();
+        Level level = (Level) event.getLevel();
+
+        // Schedule a deferred check (1-tick delay) so the BE is fully initialized.
+        Minecraft.getInstance().execute(() -> {
+            try {
+                BlockEntity be = level.getBlockEntity(pos);
+                if (be instanceof BlockEntityPortal portal && !PortalLiveViewManager.isTracked(pos)) {
+                    PortalLiveViewManager.addPortal(portal, pos);
+                }
+            } catch (Exception ignored) {}
+        });
     }
 
     @SubscribeEvent
