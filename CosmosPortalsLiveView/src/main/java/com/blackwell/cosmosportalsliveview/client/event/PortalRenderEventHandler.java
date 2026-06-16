@@ -226,7 +226,7 @@ public class PortalRenderEventHandler {
             if (!LiveViewState.isEnabled(dockPos)) continue;
 
             DynamicTexture texture = data.getTexture();
-            if (texture == null || texture.getPixels() == null) continue;
+            if (texture == null) continue;
 
             // Include version in key so resolution changes force a new GL texture object.
             ResourceLocation texLoc = minecraft.getTextureManager().register(
