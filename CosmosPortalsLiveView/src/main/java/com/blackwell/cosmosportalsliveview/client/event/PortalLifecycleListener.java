@@ -14,26 +14,23 @@ import net.minecraftforge.event.level.BlockEvent;
 @Mod.EventBusSubscriber(modid = "cosmosportals_liveview", bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 @OnlyIn(Dist.CLIENT)
 public class PortalLifecycleListener {
-    
+
     @SubscribeEvent
     public static void onBlockBreak(BlockEvent.BreakEvent event) {
         Block block = event.getState().getBlock();
-        
         if (isCosmosPortalBlock(block)) {
             PortalLiveViewManager.removePortal(event.getPos());
         }
     }
-    
+
     private static boolean isCosmosPortalBlock(Block block) {
         try {
             ResourceLocation key = ForgeRegistries.BLOCKS.getKey(block);
             if (key != null) {
-                String modId = key.getNamespace();
-                String blockName = key.getPath();
-                return modId.equals("cosmosportals") && blockName.contains("portal");
+                return "cosmosportals".equals(key.getNamespace())
+                        && key.getPath().contains("portal");
             }
-        } catch (Exception e) {
-        }
+        } catch (Exception ignored) {}
         return false;
     }
 }

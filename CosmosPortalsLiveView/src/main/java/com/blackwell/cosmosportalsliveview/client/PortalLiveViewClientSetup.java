@@ -2,18 +2,17 @@ package com.blackwell.cosmosportalsliveview.client;
 
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
-import net.minecraftforge.common.MinecraftForge;
 
-import com.blackwell.cosmosportalsliveview.client.event.PortalRenderEventHandler;
-import com.blackwell.cosmosportalsliveview.client.event.PortalLifecycleListener;
-import com.blackwell.cosmosportalsliveview.client.event.BlockEntityCleanupListener;
-
+/**
+ * Client setup class. Event handlers are registered automatically via
+ * {@code @Mod.EventBusSubscriber} on each handler class — no manual
+ * {@code MinecraftForge.EVENT_BUS.register()} calls are needed or wanted
+ * (doing both causes double-registration crashes).
+ */
 @OnlyIn(Dist.CLIENT)
 public class PortalLiveViewClientSetup {
-    
+
     public static void setupClient() {
-        MinecraftForge.EVENT_BUS.register(PortalRenderEventHandler.class);
-        MinecraftForge.EVENT_BUS.register(PortalLifecycleListener.class);
-        MinecraftForge.EVENT_BUS.register(BlockEntityCleanupListener.class);
+        // Intentionally empty — see class javadoc.
     }
 }

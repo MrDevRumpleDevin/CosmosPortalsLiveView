@@ -2,20 +2,32 @@ modLoader="javafml"
 loaderVersion="[47,)"
 
 license="All Rights Reserved"
-issueTrackerURL="https://github.com/MinecraftForge/MinecraftForge/issues"
 showAsResourcePack=false
-clientSideOnly=false
+clientSideOnly=true
 
 [[mods]]
 modId="cosmosportals_liveview"
 version="1.20.1-1.0.0"
 displayName="Cosmos Portals Live View"
-description="Adds a live view option to Cosmos Portals surfaces"
-
+description="Adds a Live View option to Cosmos Portals portal surfaces. Cycle the colour button to the Default (empty) slot to activate."
 
 [[dependencies.cosmosportals_liveview]]
 modId="cosmosportals"
 mandatory=true
 versionRange="[7.5.0.0,)"
+ordering="BEFORE"
+side="CLIENT"
+
+[[dependencies.cosmosportals_liveview]]
+modId="forge"
+mandatory=true
+versionRange="[47.4,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.cosmosportals_liveview]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.21)"
 ordering="NONE"
 side="BOTH"

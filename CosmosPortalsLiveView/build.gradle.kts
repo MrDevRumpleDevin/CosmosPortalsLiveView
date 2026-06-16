@@ -1,5 +1,6 @@
 plugins {
     id("net.minecraftforge.gradle") version "[6.0.36,6.2)"
+    java
 }
 
 version = "1.20.1-1.0.0"
@@ -10,11 +11,13 @@ base {
 }
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(17))
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 repositories {
     mavenCentral()
+    maven { url = uri("https://maven.minecraftforge.net/") }
 }
 
 minecraft {
@@ -23,8 +26,8 @@ minecraft {
 
 dependencies {
     minecraft("net.minecraftforge:forge:1.20.1-47.4.20")
-    compileOnly(files("libs/cosmos-library-1.20.1-10.6.0.0.jar"))
-    compileOnly(files("libs/cosmosportals-1.20.1-7.5.0.0.jar"))
+    compileOnly(files("libs/cosmos-library-1.20.1-10.6.0.0-universal.jar"))
+    compileOnly(files("libs/cosmosportals-1.20.1-7.5.0.0-universal.jar"))
 }
 
 tasks.withType<JavaCompile>().configureEach {
