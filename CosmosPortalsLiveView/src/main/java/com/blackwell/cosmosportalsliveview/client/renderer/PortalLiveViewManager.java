@@ -67,6 +67,7 @@ public class PortalLiveViewManager {
                 // Capture on background thread — pass a snapshot of the level reference.
                 // NativeImage allocation and pixel fill happen off the main thread;
                 // DynamicTexture.upload() is called back on the render thread via markDirty().
+                LocalizedChunkCapture.captureAsync(data, level);
                 updated++;
             }
         }

@@ -27,6 +27,8 @@ public class MixinGameRenderer {
     @Inject(method = "renderLevel", at = @At("TAIL"))
     private void onRenderLevelTail(float partialTick, long finishNanoTime,
                                    PoseStack poseStack, CallbackInfo ci) {
-        FboCapture.onRenderLevelTail(partialTick);
+        // FBO approach disabled — GL state corruption not resolved.
+        // Re-enable once FboCapture is fixed.
+        // FboCapture.onRenderLevelTail(partialTick);
     }
 }
