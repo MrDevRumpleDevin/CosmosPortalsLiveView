@@ -397,22 +397,19 @@ public class PortalRenderEventHandler {
             double pex = camPos3.x - centerX;
             double pey = camPos3.y - centerY;
             double pez = camPos3.z - centerZ;
-            float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-            // Sign convention: moving right at the source portal should reveal MORE
-            // of the left side at the destination — negate the right offset.
-            // Up is also negated: moving up reveals more of the lower destination.
-            // Forward is the distance along the portal face normal — used to vary FOV
-            // so standing close makes the portal feel like a tight window.
-            //   axis=X (face normal ±Z): right=X, forward=Z
-            //   axis=Z (face normal ±X): right=Z, forward=X
+            // Store raw portal-local offsets (no scale yet — applied in raycaster).
+            // Right/up negated: moving right at source reveals more of the LEFT
+            // side at destination, like looking through a real door.
+            //   axis=X (face normal ±Z): right=X, up=Y, forward=Z
+            //   axis=Z (face normal ±X): right=Z, up=Y, forward=X
             if (isXAxis) {
-                data.parallaxOffsetRight   = (float)(-pex * scale);
-                data.parallaxOffsetUp      = (float)(-pey * scale);
-                data.parallaxOffsetForward = (float) Math.abs(pez);
+                data.parallaxOffsetRight   = (float)(-pex);
+                data.parallaxOffsetUp      = (float)(-pey);
+                data.parallaxOffsetForward = (float)  Math.abs(pez);
             } else {
-                data.parallaxOffsetRight   = (float)(-pez * scale);
-                data.parallaxOffsetUp      = (float)(-pey * scale);
-                data.parallaxOffsetForward = (float) Math.abs(pex);
+                data.parallaxOffsetRight   = (float)(-pez);
+                data.parallaxOffsetUp      = (float)(-pey);
+                data.parallaxOffsetForward = (float)  Math.abs(pex);
             }
         }
 

@@ -196,22 +196,25 @@ public class LocalizedChunkCapture {
         double upY =  rightZ * fwdX - rightX * fwdZ;
         double upZ =  rightX * fwdY;
 
-        // Apply parallax lateral shift.
-        // Clamp to portal half-size so extreme angles don't go wild.
-        float clampedRight = Math.max(-portalHalfW, Math.min(portalHalfW, parallaxRight));
-        float clampedUp    = Math.max(-portalHalfH, Math.min(portalHalfH, parallaxUp));
-        eyeX += rightX * clampedRight + upX * clampedUp;
-        eyeY +=                         upY * clampedUp;
-        eyeZ += rightZ * clampedRight + upZ * clampedUp;
+        // Angular parallax — door/window model:
+        //   The angle your eye makes through the doorframe = lateralOffset / forwardDist.
+        //   At the destination, shift the virtual eye by that same angle * VIRTUAL_SCREEN_DIST.
+        //   This means: far from portal = small shift, close = large shift. No FOV change.
+        //   parallaxScale from config lets the user tune the strength.
+        float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
+        double forwardDist = Math.max(0.5, parallaxForward); // avoid div/0 when on the portal face
+        double shiftRight = (parallaxRight / forwardDist) * VIRTUAL_SCREEN_DIST * scale;
+        double shiftUp    = (parallaxUp    / forwardDist) * VIRTUAL_SCREEN_DIST * scale;
+        // Clamp so you can't look completely around the corner
+        shiftRight = Math.max(-portalHalfW * 2, Math.min(portalHalfW * 2, shiftRight));
+        shiftUp    = Math.max(-portalHalfH * 2, Math.min(portalHalfH * 2, shiftUp));
 
-        // Apply parallax depth: player distance from the portal face drives the effective
-        // screen distance — closer = tighter FOV (you're right at the window),
-        // farther = wider FOV (small window in the distance).
-        // Clamp to [0.5 .. 16] to avoid extreme values.
-        double screenDist = Math.max(0.5, Math.min(16.0, parallaxForward));
+        eyeX += rightX * shiftRight + upX * shiftUp;
+        eyeY +=                       upY * shiftUp;
+        eyeZ += rightZ * shiftRight + upZ * shiftUp;
 
-        double halfFovW = portalHalfW / screenDist;
-        double halfFovH = portalHalfH / screenDist;
+        double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
+        double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;
 
         float[] depthBuf = new float[resW * resH];
 
