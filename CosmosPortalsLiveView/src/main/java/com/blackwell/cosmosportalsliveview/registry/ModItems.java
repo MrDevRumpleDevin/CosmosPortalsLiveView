@@ -1,6 +1,8 @@
 package com.blackwell.cosmosportalsliveview.registry;
 
 import com.blackwell.cosmosportalsliveview.CosmosPortalsLiveView;
+import com.blackwell.cosmosportalsliveview.item.ItemDestLeftRightWand;
+import com.blackwell.cosmosportalsliveview.item.ItemDestUpDownWand;
 import com.blackwell.cosmosportalsliveview.item.ItemLiveViewWand;
 
 import net.minecraft.resources.ResourceKey;
@@ -22,13 +24,26 @@ public class ModItems {
     public static final DeferredRegister<Item> ITEMS =
             DeferredRegister.create(ForgeRegistries.ITEMS, CosmosPortalsLiveView.MOD_ID);
 
+    /** Original wand — toggle live view, cycle modes, face offset, debug info. */
     public static final RegistryObject<Item> LIVE_VIEW_WAND = ITEMS.register(
             "live_view_wand",
             () -> new ItemLiveViewWand(new Item.Properties().stacksTo(1))
     );
 
+    /** Dedicated wand: right-click = dest LEFT, shift+right-click = dest RIGHT. */
+    public static final RegistryObject<Item> DEST_LEFT_RIGHT_WAND = ITEMS.register(
+            "dest_left_right_wand",
+            () -> new ItemDestLeftRightWand(new Item.Properties().stacksTo(1))
+    );
+
+    /** Dedicated wand: right-click = dest UP, shift+right-click = dest DOWN. */
+    public static final RegistryObject<Item> DEST_UP_DOWN_WAND = ITEMS.register(
+            "dest_up_down_wand",
+            () -> new ItemDestUpDownWand(new Item.Properties().stacksTo(1))
+    );
+
     /**
-     * Injects the Live View Wand into the CosmosPortals creative tab.
+     * Injects all Live View items into the CosmosPortals creative tab.
      * Tab resource key: cosmosportals:cosmos_portals
      */
     @SubscribeEvent
@@ -39,6 +54,8 @@ public class ModItems {
         );
         if (event.getTabKey().equals(cosmosTab)) {
             event.accept(LIVE_VIEW_WAND.get());
+            event.accept(DEST_LEFT_RIGHT_WAND.get());
+            event.accept(DEST_UP_DOWN_WAND.get());
         }
     }
 }
