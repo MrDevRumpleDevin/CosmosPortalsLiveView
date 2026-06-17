@@ -205,44 +205,53 @@ public class LocalizedChunkCapture {
         double fwdY =  0.0;
         double fwdZ =  Math.cos(yawRad);
 
-        // ── Eye position: fixed at resting eye height behind the portal plane ──
-        // Eye is pushed back EYE_FORWARD_OFFSET (0.5 blocks) so it sits just inside
-        // the destination room without z-clipping.
-        // destOffsetRight / destOffsetUp shift the eye laterally/vertically — this moves
-        // the "hole" position at the destination, like Immersive Portals' destination wand.
-        // parallaxRight shifts the view using an off-axis frustum for parallax panning.
-        double eyeDepth = Math.abs(EYE_FORWARD_OFFSET); // always 0.5
+        // ── Basis vectors ──────────────────────────────────────────────────────────
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;
 
-        double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET + rightX * destOffsetRight;
-        double eyeY = portalBottomY + 1.62 + destOffsetUp;
-        double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET + rightZ * destOffsetRight;
+        // ── Eye position: mirrors player offset relative to source portal ──────
+        // parallaxForward: signed distance from portal face (positive = player on front face).
+        //   Eye is placed at -parallaxForward along fwd axis (behind dest portal plane).
+        // parallaxRight: lateral offset from portal centre.
+        // parallaxUp: raw eye height above source portal floor (= camPos.y - minY).
+        // destOffsetRight / destOffsetUp: wand-set shifts that move the "hole" position
+        //   at the destination, like Immersive Portals' destination wand.
+        // EYE_FORWARD_OFFSET is kept for reference but NOT used here.
+        double D = Math.max(0.1, Math.abs(parallaxForward)); // depth behind portal; clamped to avoid div/0
 
-        // ── Fixed aperture frustum — portal dimensions define the hole ─────────
-        // viewDist is always eyeDepth (0.5). The frustum slopes are derived from the
-        // portal half-extents divided by eyeDepth, so the rendered "hole" is always
-        // exactly the size of the portal quad regardless of player distance.
-        // The eye Y is 1.62 above the portal floor (resting eye height), so:
-        //   fovBottom = how much below eye-level the hole extends (= 1.62 blocks down to floor)
-        //   fovTop    = how much above eye-level the hole extends (= portalHeight - 1.62)
-        // This means the bottom of the image always shows the floor at the destination
-        // and the top shows what's above — a true fixed hole of portal dimensions.
-        double viewDist  = eyeDepth; // ALWAYS 0.5 — never player distance
+        double eyeX = eyePos.getX() + 0.5
+                + fwdX * (-parallaxForward)
+                + rightX * (parallaxRight + destOffsetRight);
+        double eyeY = portalBottomY + parallaxUp + destOffsetUp;
+        double eyeZ = eyePos.getZ() + 0.5
+                + fwdZ * (-parallaxForward)
+                + rightZ * (parallaxRight + destOffsetRight);
 
-        double halfFovW  = portalHalfW / viewDist;                    // symmetric horizontal
-        double fovBottom = 1.62 / viewDist;                           // slope down to portal floor
-        double fovTop    = (portalHalfH * 2.0 - 1.62) / viewDist;    // slope up to portal top
+        // ── Aperture frustum: rays from eye through portal corner edges ────────
+        // The portal aperture defines a rectangle at depth=0 from the dest plane:
+        //   horizontal: [-halfW .. +halfW] from portal centre
+        //   vertical:   [0 .. portalHalfH*2] from portal bottom (portalBottomY)
+        //
+        // Frustum slopes from the eye to each edge:
+        //   slopeRight  = ray toward the right edge of the aperture
+        //   slopeLeft   = ray toward the left edge
+        //   slopeTop    = ray toward the top edge
+        //   slopeBottom = ray toward the bottom edge (portal floor)
+        //
+        // When the player is close, D is small → slopes are large → wide cone (more visible).
+        // When far, D is large → slopes are small → narrow cone (less ceiling/floor visible).
+        // This is the correct parallax/zoom behaviour — no artificial zoom, just perspective.
+        double slopeRight  = ( portalHalfW - (parallaxRight + destOffsetRight)) / D;
+        double slopeLeft   = (-portalHalfW - (parallaxRight + destOffsetRight)) / D;
+        double slopeTop    = ( portalHalfH * 2.0 - (parallaxUp + destOffsetUp)) / D;
+        double slopeBottom = (0.0              - (parallaxUp + destOffsetUp)) / D;
 
-        // ── Off-axis horizontal panning (parallax) ─────────────────────────────
-        // Player moves right of centre → image shifts right in NDC → see more of left wall.
-        // This is a sub-pixel NDC shift — does NOT change frustum slopes (hole stays fixed).
-        float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-        double screenShiftRight = Math.max(-20.0, Math.min(20.0, parallaxRight * scale));
-        // screenShiftRight in portal-local world units; converted to NDC shift below per-pixel.
+        // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
+        double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
+        double slopeDeltaV = slopeBottom - slopeTop;   // vertical slope span (slopeBottom < slopeTop)
 
         float[] depthBuf = new float[resW * resH];
         int skyAbgr = toABGR(computeSkyColor(0));
@@ -259,21 +268,19 @@ public class LocalizedChunkCapture {
                 }
                 break;
             }
+            // ndcY: 0 = top of image (portal top), 1 = bottom (portal floor)
+            double ndcY = (py + 0.5) / resH;
+            double slopeV = slopeTop + ndcY * slopeDeltaV; // vertical slope for this row
+
             for (int px = 0; px < resW; px++) {
-                // Horizontal: symmetric NDC [-1..1] shifted by player lateral offset.
-                // screenShiftRight is in world units; divide by portalHalfW to get NDC shift.
-                double ndcX = (2.0 * px + 1.0) / resW - 1.0 + screenShiftRight / portalHalfW;
+                // ndcX: 0 = left of image, 1 = right of image
+                double ndcX = (px + 0.5) / resW;
+                double slopeH = slopeLeft + ndcX * slopeDeltaH; // horizontal slope for this column
 
-                // Vertical: asymmetric — py=0 is top of image (portal top), py=resH-1 is bottom (portal floor).
-                // t=0 → top of portal, t=1 → bottom of portal.
-                double t = (py + 0.5) / resH;
-                // Ray slope: positive = up, negative = down.
-                // At t=0 (top): slope = +fovTop. At t=1 (bottom): slope = -fovBottom.
-                double slopeY = fovTop - t * (fovTop + fovBottom);
-
-                double rdX = fwdX + rightX * ndcX * halfFovW;
-                double rdY = fwdY + upY * slopeY;
-                double rdZ = fwdZ + rightZ * ndcX * halfFovW;
+                // Ray direction: forward + lateral*slopeH + up*slopeV
+                double rdX = fwdX + rightX * slopeH + upX * slopeV;
+                double rdY = fwdY              + upY * slopeV;
+                double rdZ = fwdZ + rightZ * slopeH + upZ * slopeV;
 
                 double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
                 if (len < 1e-9) {
@@ -300,11 +307,15 @@ public class LocalizedChunkCapture {
             if (depth < 0.5) continue;
             double projX = dx * rightX              + dz * rightZ;
             double projY = dx * upX + dy * upY + dz * upZ;
-            int screenX = (int)((projX / (depth * halfFovW) + 1.0) * 0.5 * resW);
-            // Asymmetric vertical: map slope back to pixel row.
-            // slopeY = fovTop - t*(fovTop+fovBottom), so t = (fovTop - slopeY)/(fovTop+fovBottom)
-            double entitySlopeY = projY / depth;
-            int screenY = (int)((fovTop - entitySlopeY) / (fovTop + fovBottom) * resH);
+            // Aperture frustum: map projected slope back to pixel coordinates.
+            // slopeH = projX/depth, maps from [slopeLeft..slopeRight] → [0..resW]
+            // slopeV = projY/depth, maps from [slopeTop..slopeBottom]  → [0..resH]
+            double entitySlopeH = projX / depth;
+            double entitySlopeV = projY / depth;
+            // ndcX in [0..1]: (slopeH - slopeLeft) / slopeDeltaH
+            int screenX = (int)((entitySlopeH - slopeLeft) / slopeDeltaH * resW);
+            // ndcY in [0..1]: (slopeV - slopeTop) / slopeDeltaV  (slopeDeltaV is slopeBottom-slopeTop, negative when up > down)
+            int screenY = (int)((entitySlopeV - slopeTop)  / slopeDeltaV * resH);
             int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
             for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
                 for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
