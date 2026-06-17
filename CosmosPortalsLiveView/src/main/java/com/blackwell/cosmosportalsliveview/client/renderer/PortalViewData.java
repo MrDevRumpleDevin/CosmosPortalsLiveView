@@ -99,7 +99,11 @@ public class PortalViewData {
         }
         this.liveViewTexture = texture;
         this.textureVersion++;
-        this.lastCaptureTime = System.currentTimeMillis();
+        // Set lastCaptureTime to 0 so shouldUpdateCapture fires immediately on the next
+        // render frame after this one completes. captureInFlight prevents overlap.
+        // The config captureIntervalMs now acts as a floor only when the raycaster is fast;
+        // when it's slow the next capture starts as soon as the previous finishes.
+        this.lastCaptureTime = 0;
         this.needsUpdate = false;
     }
 

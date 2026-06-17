@@ -69,9 +69,18 @@ public class LocalizedChunkCapture {
     private static final ExecutorService CAPTURE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "CosmosLiveView-Capture");
         t.setDaemon(true);
+        // Slightly below normal so the render thread is not starved.
         t.setPriority(Thread.NORM_PRIORITY - 1);
         return t;
     });
+
+    /**
+     * Per-frame budget for the raycaster in nanoseconds.
+     * If a render exceeds this, remaining pixels get sky color and the result is still uploaded
+     * (partial frame rather than a full freeze/stale hold).
+     * 80 ms gives a comfortable margin below 100 ms interval at cost of occasional partial renders.
+     */
+    private static final long RENDER_BUDGET_NS = 80_000_000L; // 80 ms
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -120,11 +129,12 @@ public class LocalizedChunkCapture {
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
             try {
+                long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
                 image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
-                                              entityDots);
+                                              entityDots, deadlineNs);
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
                     try {
@@ -175,7 +185,8 @@ public class LocalizedChunkCapture {
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp, float parallaxForward,
-                                                      List<EntityDot> entityDots) {
+                                                      List<EntityDot> entityDots,
+                                                      long deadlineNs) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
 
         double yawRad = Math.toRadians(yawDeg);
@@ -203,26 +214,15 @@ public class LocalizedChunkCapture {
         double upZ = 0.0;
 
         // ── "Hole in wall" parallax — eye translation model ────────────────────
-        // The virtual camera position shifts laterally/vertically at the destination
-        // to match where the player stands relative to the portal centre.
-        // Direction never rotates — the view always looks straight through.
-        //
-        // parallaxRight: signed lateral offset (sign already corrected in EventHandler
-        //   so positive = player to the right → eye shifts right at destination).
-        // parallaxUp: signed vertical offset from portal centre (player eye height
-        //   relative to portal centre; PLAYER_EYE_HEIGHT already subtracted in EventHandler).
-        // parallaxForward: signed distance from portal face (positive = near side,
-        //   negative = far side). Magnitude determines the virtual screen distance —
-        //   further away → frustum widens naturally to match portal size; up close
-        //   the frustum is tight so the portal fills the screen seamlessly.
-        //
-        // FOV: virtual screen plane at distance |parallaxForward| from eye.
-        //   halfFovW = portalHalfW / virtualScreenDist
-        //   → at the portal face the frustum exactly spans the portal opening.
-        //   Min-clamped to 0.5 so we never divide by near-zero.
+        // The virtual camera shifts laterally/vertically to match the player's
+        // offset relative to the portal centre. Direction never rotates — always
+        // looks straight through. FOV is fixed (VIRTUAL_SCREEN_DIST), so moving
+        // toward or away from the portal does NOT zoom the view.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
 
-        double virtualScreenDist = Math.max(0.5, Math.abs((double) parallaxForward));
+        // Fixed virtual screen distance — determines FOV, not affected by player distance.
+        // Portal half-extents define the frustum at this fixed depth.
+        double virtualScreenDist = VIRTUAL_SCREEN_DIST;
 
         // Shift the eye laterally by the player's offset (scaled).
         // Right axis: (rightX, 0, rightZ). Up axis: world-up (0,1,0).
@@ -235,8 +235,20 @@ public class LocalizedChunkCapture {
         double halfFovH = portalHalfH / virtualScreenDist;
 
         float[] depthBuf = new float[resW * resH];
+        int skyAbgr = toABGR(computeSkyColor(0));
 
         for (int py = 0; py < resH; py++) {
+            // Budget check once per scanline — avoids nanoTime() overhead per pixel.
+            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) {
+                // Fill remaining rows with sky and bail — gives a partial but uploadable frame.
+                for (int fy = py; fy < resH; fy++) {
+                    for (int fx = 0; fx < resW; fx++) {
+                        image.setPixelRGBA(fx, fy, skyAbgr);
+                        depthBuf[fy * resW + fx] = MAX_RAY_DIST;
+                    }
+                }
+                break;
+            }
             for (int px = 0; px < resW; px++) {
                 double ndcX =  (2.0 * px + 1.0) / resW - 1.0;
                 double ndcY = 1.0 - (2.0 * py + 1.0) / resH;
@@ -283,7 +295,8 @@ public class LocalizedChunkCapture {
             }
         }
 
-        flipVertical(image, resW, resH);
+        // No vertical flip — raycaster already writes py=0 as sky (top of image).
+        // NativeImage in Minecraft is stored top-row-first matching GL_UNPACK_FLIP_ROW_ORDER.
         return image;
     }
 
