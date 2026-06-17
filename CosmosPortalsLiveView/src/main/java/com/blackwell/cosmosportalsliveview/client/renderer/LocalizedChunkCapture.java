@@ -123,6 +123,7 @@ public class LocalizedChunkCapture {
         // interpolated offset — eliminates jumps from async timing gaps.
         final float parallaxRight    = portalData.smoothParallaxRight;
         final float parallaxUp       = portalData.smoothParallaxUp;
+        final float parallaxForward  = portalData.smoothParallaxForward;
         final float portalBottomY    = portalData.portalBottomY;
         final float destOffsetRight  = portalData.destOffsetRight;
         final float destOffsetUp     = portalData.destOffsetUp;
@@ -135,7 +136,7 @@ public class LocalizedChunkCapture {
                 image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
-                                              parallaxRight, parallaxUp,
+                                              parallaxRight, parallaxUp, parallaxForward,
                                               portalBottomY,
                                               destOffsetRight, destOffsetUp, destOffsetForward,
                                               entityDots, deadlineNs);
@@ -189,6 +190,7 @@ public class LocalizedChunkCapture {
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp,
+                                                      float parallaxForward,
                                                       float portalBottomY,
                                                       float destOffsetRight, float destOffsetUp,
                                                       float destOffsetForward,
@@ -214,12 +216,18 @@ public class LocalizedChunkCapture {
         double upZ = 0.0;
 
         // ── Eye position ───────────────────────────────────────────────────────
-        // Fixed depth: eye is always EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane.
-        // parallaxRight/Up shift the eye laterally — player peeks left/right, up/down.
-        // destOffsetRight/Up/Forward are wand-set shifts that move the "hole" at destination.
-        // destOffsetForward moves eye along fwd axis (+ = deeper into dest room).
-        // parallaxForward is NOT used here — removing distance-driven zoom entirely.
-        double D = Math.abs(EYE_FORWARD_OFFSET); // fixed 0.5, never changes
+        // Eye is placed EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane,
+        // then shifted by destOffsetForward (wand), parallaxRight/Up (player peek),
+        // and destOffsetRight/Up (wand pan — independent of parallax).
+        //
+        // D = physical distance from player eye to portal face (i.e. abs(parallaxForward)),
+        // clamped to a minimum of 0.5 so the view never goes degenerate when touching the portal.
+        // This makes the visible window smaller as the player backs away — correct perspective.
+        //
+        // Frustum slopes only use parallaxRight/Up (player lateral offset) for perspective
+        // narrowing. destOffsetRight/Up shift the eye without changing the aperture shape,
+        // producing a pure pan (translation) rather than tilt/rotation.
+        double D = Math.max(Math.abs(EYE_FORWARD_OFFSET), Math.abs(parallaxForward));
 
         double eyeX = eyePos.getX() + 0.5
                 + fwdX * EYE_FORWARD_OFFSET               // fixed 0.5 behind portal plane
@@ -232,12 +240,13 @@ public class LocalizedChunkCapture {
                 + rightZ * (parallaxRight + destOffsetRight);
 
         // ── Aperture frustum: rays from eye through portal corner edges ────────
-        // D = 0.5 always → fixed-aperture FOV based solely on portal size.
-        // No zoom in/out as player moves — aperture is a fixed window.
-        double slopeRight  = ( portalHalfW - (parallaxRight + destOffsetRight)) / D;
-        double slopeLeft   = (-portalHalfW - (parallaxRight + destOffsetRight)) / D;
-        double slopeTop    = ( portalHalfH * 2.0 - (parallaxUp + destOffsetUp)) / D;
-        double slopeBottom = (0.0              - (parallaxUp + destOffsetUp)) / D;
+        // Slopes to portal edges are computed relative to the eye's parallax-shifted position.
+        // destOffsetRight/Up are intentionally excluded here — they pan the eye without
+        // changing which portion of the portal window is visible (no tilt/rotation artifact).
+        double slopeRight  = ( portalHalfW - parallaxRight) / D;
+        double slopeLeft   = (-portalHalfW - parallaxRight) / D;
+        double slopeTop    = ( portalHalfH * 2.0 - parallaxUp) / D;
+        double slopeBottom = (0.0              - parallaxUp) / D;
 
         // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
         double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
