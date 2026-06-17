@@ -227,7 +227,7 @@ public class LocalizedChunkCapture {
         // Frustum slopes only use parallaxRight/Up (player lateral offset) for perspective
         // narrowing. destOffsetRight/Up shift the eye without changing the aperture shape,
         // producing a pure pan (translation) rather than tilt/rotation.
-        double D = Math.max(Math.abs(EYE_FORWARD_OFFSET), Math.abs(parallaxForward));
+        double D = Math.abs(EYE_FORWARD_OFFSET); // fixed 0.5 — texture FOV never changes
 
         double eyeX = eyePos.getX() + 0.5
                 + fwdX * EYE_FORWARD_OFFSET               // fixed 0.5 behind portal plane
@@ -258,13 +258,8 @@ public class LocalizedChunkCapture {
         for (int py = 0; py < resH; py++) {
             // Budget check once per scanline — avoids nanoTime() overhead per pixel.
             if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) {
-                // Fill remaining rows with sky and bail — gives a partial but uploadable frame.
-                for (int fy = py; fy < resH; fy++) {
-                    for (int fx = 0; fx < resW; fx++) {
-                        image.setPixelRGBA(fx, fy, skyAbgr);
-                        depthBuf[fy * resW + fx] = MAX_RAY_DIST;
-                    }
-                }
+                // Budget exceeded — leave remaining rows as zero (transparent).
+                // The portal's own colour layer shows through, no sky-blue band.
                 break;
             }
             // ndcY: 0 = top of image (portal top), 1 = bottom (portal floor)
