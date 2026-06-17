@@ -244,28 +244,26 @@ public class LocalizedChunkCapture {
                 + fwdZ * (EYE_FORWARD_OFFSET + destOffsetForward)
                 + rightZ * destOffsetRight;
 
-        // ── D: player distance from the portal FACE ────────────────────────────
-        // parallaxForward is measured to portal CENTER; face is 0.5 blocks closer.
-        // Min 0.5 so slopes stay valid when player is touching the portal surface.
-        double D = Math.max(0.5, Math.abs(parallaxForward) - 0.5);
+        // ── Frustum slopes: fixed-eye model (no forward/back drift) ──────────
+        //
+        // The eye is fixed at the destination — it never moves when the player
+        // walks toward or away from the portal. Therefore the cast rays must also
+        // be fixed: we define them relative to a constant reference depth equal to
+        // abs(EYE_FORWARD_OFFSET) = 0.5, which is the eye-to-portal-face distance.
+        //
+        // Using D (player distance) here was the bug: as the player walked closer
+        // D shrank, slopes steepened, and the scene appeared to rush forward.
+        //
+        // FIXED_EYE_DEPTH replaces D for ALL slope calculations.
+        // parallaxRight still shifts the horizontal slopes to produce the correct
+        // left/right peek effect — that part is unchanged.
+        // parallaxForward is no longer used in the raycaster at all.
+        final double FIXED_EYE_DEPTH = Math.abs(EYE_FORWARD_OFFSET); // 0.5
 
-        // ── Frustum slopes: window/doorway model (no vertical drift) ─────────
-        //
-        // Each pixel on the portal quad corresponds to a point on the portal face.
-        // The ray from the player's eye through that point defines the cast angle.
-        //
-        // Because the eye is at the portal VERTICAL CENTER, vertical slopes are
-        // symmetric: top = +halfH/D, bottom = -halfH/D.
-        // The vertical center of the image always maps to the straight-ahead ray
-        // regardless of D, so the scene does not translate as the player moves.
-        //
-        // Horizontal: player is parallaxRight off-centre laterally. The slope center
-        // shifts by -parallaxRight/D (peek effect). As D grows slopes compress →
-        // visible window narrows, exactly like looking through a real hole in a wall.
-        double slopeRight  = ( portalHalfW - parallaxRight) / D;
-        double slopeLeft   = (-portalHalfW - parallaxRight) / D;
-        double slopeTop    =  portalHalfH / D;
-        double slopeBottom = -portalHalfH / D;
+        double slopeRight  = ( portalHalfW - parallaxRight) / FIXED_EYE_DEPTH;
+        double slopeLeft   = (-portalHalfW - parallaxRight) / FIXED_EYE_DEPTH;
+        double slopeTop    =  portalHalfH / FIXED_EYE_DEPTH;
+        double slopeBottom = -portalHalfH / FIXED_EYE_DEPTH;
 
         // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
         double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
