@@ -233,8 +233,9 @@ public class PortalRenderEventHandler {
             // This runs on the render thread every frame, so the smoothed values
             // advance continuously — no jumps even with async raycaster gaps.
             float alpha = PortalViewData.PARALLAX_SMOOTH;
-            data.smoothParallaxRight = data.smoothParallaxRight + alpha * (data.parallaxOffsetRight - data.smoothParallaxRight);
-            data.smoothParallaxUp    = data.smoothParallaxUp    + alpha * (data.parallaxOffsetUp    - data.smoothParallaxUp);
+            data.smoothParallaxRight   = data.smoothParallaxRight   + alpha * (data.parallaxOffsetRight   - data.smoothParallaxRight);
+            data.smoothParallaxUp      = data.smoothParallaxUp      + alpha * (data.parallaxOffsetUp      - data.smoothParallaxUp);
+            data.smoothParallaxForward = data.smoothParallaxForward + alpha * (data.parallaxOffsetForward - data.smoothParallaxForward);
 
             // ── Per-frame capture trigger ──────────────────────────────────────
             if (capturedThisFrame < portalsPerFrame
