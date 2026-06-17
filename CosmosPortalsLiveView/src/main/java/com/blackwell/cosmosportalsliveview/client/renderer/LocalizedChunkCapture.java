@@ -123,7 +123,7 @@ public class LocalizedChunkCapture {
         // interpolated offset — eliminates jumps from async timing gaps.
         final float parallaxRight   = portalData.smoothParallaxRight;
         final float parallaxUp      = portalData.smoothParallaxUp;
-        final float parallaxForward = portalData.parallaxOffsetForward; // forward only used for sign
+        final float parallaxForward = portalData.smoothParallaxForward;
         final float portalBottomY   = portalData.portalBottomY;
 
         CAPTURE_EXECUTOR.submit(() -> {
@@ -218,23 +218,24 @@ public class LocalizedChunkCapture {
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── Asymmetric frustum: portal opening is the exact aperture ───────────
-        // The eye is at resting height (1.62) above the portal floor, NOT centered
-        // in the portal vertically. So the frustum is asymmetric:
-        //   - Bottom ray passes through the portal floor   → 1.62 below the eye
-        //   - Top ray passes through the portal top        → (portalHalfH*2 - 1.62) above the eye
-        // Both anchored at the portal plane, eyeDepth away.
-        // Horizontally the eye IS centered → symmetric left/right.
+        // ── Asymmetric frustum driven by player distance ───────────────────────
+        // The portal opening is the aperture. The player's distance from the portal
+        // determines how much of the destination is visible:
+        //   - Far away → shallow angles through portal edges → see less above/below/sides
+        //   - Close up → steep angles → see more
         //
-        // halfFovW / fovBottom / fovTop are slopes (rise/run), not angles.
-        // They define how the ray direction is computed per pixel.
-        double halfFovW  = portalHalfW / eyeDepth;           // symmetric horizontal
-        double fovBottom = 1.62              / eyeDepth;      // slope to portal floor
-        double fovTop    = (portalHalfH * 2.0 - 1.62) / eyeDepth; // slope to portal top
+        // viewDist = how far the player is standing from the portal face (parallaxForward).
+        // Minimum of eyeDepth so we never divide by zero or invert when player is in the portal.
+        // halfFovW / fovBottom / fovTop are slopes (world units per forward unit), not angles.
+        double viewDist = Math.max(eyeDepth, Math.abs(parallaxForward));
+
+        double halfFovW  = portalHalfW / viewDist;                    // symmetric horizontal
+        double fovBottom = 1.62 / viewDist;                           // slope to portal floor
+        double fovTop    = (portalHalfH * 2.0 - 1.62) / viewDist;    // slope to portal top
 
         // ── Off-axis horizontal shift (panning) ────────────────────────────────
         // Player moves right of centre → screen shifts right → see more of left wall.
-        // No vertical screen shift — eye Y is fixed, asymmetric frustum handles vertical.
+        // No vertical screen shift — player distance + asymmetric frustum handle vertical.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
         double screenShiftRight = Math.max(-20.0, Math.min(20.0, parallaxRight * scale));
         // screenShiftRight in portal-local world units; convert to NDC shift below per-pixel.
