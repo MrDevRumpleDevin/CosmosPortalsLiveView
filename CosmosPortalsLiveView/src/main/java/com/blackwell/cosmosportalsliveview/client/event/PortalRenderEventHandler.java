@@ -432,8 +432,14 @@ public class PortalRenderEventHandler {
         {
             Vec3 camPos3 = camera.getPosition();
             double pex = camPos3.x - centerX;
-            // Eye height above the portal floor (raw — used directly as destination eyeY offset)
-            double pey = camPos3.y - minY;
+            // Eye height above the portal floor.
+            // Use feet Y + constant eye height instead of raw camera Y to strip head-bob,
+            // which would otherwise oscillate parallaxUp and cause the bottom rows to flicker.
+            LocalPlayer lp = Minecraft.getInstance().player;
+            double stableEyeY = (lp != null)
+                    ? lp.getY() + PLAYER_EYE_HEIGHT
+                    : camPos3.y;
+            double pey = stableEyeY - minY;
             double pez = camPos3.z - centerZ;
 
             if (isXAxis) {
