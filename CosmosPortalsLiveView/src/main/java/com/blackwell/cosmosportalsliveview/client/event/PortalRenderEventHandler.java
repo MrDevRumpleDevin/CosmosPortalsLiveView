@@ -229,11 +229,14 @@ public class PortalRenderEventHandler {
             if (dockPos == null) continue;
             if (!LiveViewState.isEnabled(dockPos)) continue;
 
-            // ── Per-frame capture trigger (was tick-based — now every frame) ──
-            // This is the key to feeling live: parallax offsets are updated just
-            // above in renderPortalFrame, then we immediately kick a new capture
-            // if the interval has elapsed.  captureAsync is a no-op if one is
-            // already in flight, so there is no pile-up.
+            // ── Smooth parallax offsets toward raw values each frame ──────────
+            // This runs on the render thread every frame, so the smoothed values
+            // advance continuously — no jumps even with async raycaster gaps.
+            float alpha = PortalViewData.PARALLAX_SMOOTH;
+            data.smoothParallaxRight = data.smoothParallaxRight + alpha * (data.parallaxOffsetRight - data.smoothParallaxRight);
+            data.smoothParallaxUp    = data.smoothParallaxUp    + alpha * (data.parallaxOffsetUp    - data.smoothParallaxUp);
+
+            // ── Per-frame capture trigger ──────────────────────────────────────
             if (capturedThisFrame < portalsPerFrame
                     && data.shouldUpdateCapture(currentTime, captureInterval)) {
                 LocalizedChunkCapture.captureAsync(data, level);

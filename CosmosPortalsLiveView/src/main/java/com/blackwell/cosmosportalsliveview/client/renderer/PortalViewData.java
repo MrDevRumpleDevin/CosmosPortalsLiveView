@@ -50,10 +50,20 @@ public class PortalViewData {
      *   axis=Z portals: positive = player on +X side (west face),  negative = -X side (east face)
      * The sign tells the raycaster which side the viewer is on, so it can flip
      * the right-axis direction accordingly.
+     *
+     * The "Smooth" variants are exponentially smoothed on the render thread each frame
+     * and are what the raycaster actually consumes — this eliminates jitter from async gaps.
      */
     public volatile float parallaxOffsetRight   = 0f;
     public volatile float parallaxOffsetUp      = 0f;
     public volatile float parallaxOffsetForward = 2.0f; // signed — see above
+
+    // Smoothed values — interpolated toward the raw offsets each frame.
+    public volatile float smoothParallaxRight   = 0f;
+    public volatile float smoothParallaxUp      = 0f;
+
+    /** Exponential smoothing factor per frame (0=no smoothing, 1=instant). 0.18 ≈ ~5 frame blend. */
+    public static final float PARALLAX_SMOOTH = 0.18f;
 
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;

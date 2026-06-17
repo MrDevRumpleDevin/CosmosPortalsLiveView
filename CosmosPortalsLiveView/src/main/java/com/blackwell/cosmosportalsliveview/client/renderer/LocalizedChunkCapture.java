@@ -119,12 +119,11 @@ public class LocalizedChunkCapture {
         final BlockPos destPos   = portalData.destPos;
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
-        // Parallax: lateral shift of the virtual camera at the destination.
-        // parallaxOffsetRight/Up are in portal-local space and map directly to
-        // the destination camera's right/up axes (same orientation as source portal).
-        final float parallaxRight   = portalData.parallaxOffsetRight;
-        final float parallaxUp      = portalData.parallaxOffsetUp;
-        final float parallaxForward = portalData.parallaxOffsetForward;
+        // Use the smoothed parallax values so the raycaster sees a continuously
+        // interpolated offset — eliminates jumps from async timing gaps.
+        final float parallaxRight   = portalData.smoothParallaxRight;
+        final float parallaxUp      = portalData.smoothParallaxUp;
+        final float parallaxForward = portalData.parallaxOffsetForward; // forward only used for sign
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
@@ -213,23 +212,36 @@ public class LocalizedChunkCapture {
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── "Hole in wall" parallax — eye translation model ────────────────────
-        // The virtual camera shifts laterally/vertically to match the player's
-        // offset relative to the portal centre. Direction never rotates — always
-        // looks straight through. FOV is fixed (VIRTUAL_SCREEN_DIST), so moving
-        // toward or away from the portal does NOT zoom the view.
+        // ── Doorway / off-axis projection ─────────────────────────────────────
+        // The eye is FIXED behind the portal centre at EYE_FORWARD_OFFSET depth.
+        // The portal opening is the aperture. When the player moves laterally
+        // relative to the portal, the visible "window" into the destination shifts
+        // — you see more of one side, less of the other. This is exactly an
+        // off-axis (asymmetric) frustum: eye stays put, the screen-plane centre moves.
+        //
+        // Implementation:
+        //   The virtual screen plane sits at distance VIRTUAL_SCREEN_DIST in front
+        //   of the eye. Its half-extents are (portalHalfW, portalHalfH) — so the
+        //   frustum exactly spans the portal opening at that distance (no zoom in/out).
+        //
+        //   parallaxRight: player's lateral offset from portal centre in portal-space.
+        //   Player moves right → they see more of the right side of the destination
+        //   → screen centre shifts LEFT in NDC → we subtract from screenCentreX.
+        //   Clamped to ±portalHalfW so you can't pan past the edge of the portal.
+        //
+        // Eye does NOT translate — no wall clipping.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
 
-        // Fixed virtual screen distance — determines FOV, not affected by player distance.
-        // Portal half-extents define the frustum at this fixed depth.
-        double virtualScreenDist = VIRTUAL_SCREEN_DIST;
+        float clampedRight = (float) Math.max(-portalHalfW, Math.min(portalHalfW, parallaxRight * scale));
+        float clampedUp    = (float) Math.max(-portalHalfH, Math.min(portalHalfH, parallaxUp    * scale * 0.3f));
 
-        // Shift the eye laterally by the player's offset (scaled).
-        // Right axis: (rightX, 0, rightZ). Up axis: world-up (0,1,0).
-        // Vertical damped ×0.3 — subtle secondary effect.
-        eyeX += rightX * parallaxRight * scale;
-        eyeZ += rightZ * parallaxRight * scale;
-        eyeY += upY    * parallaxUp    * scale * 0.3;
+        // Shift of the screen centre in world units at the virtual screen plane.
+        // Positive parallaxRight (player right of centre) → screen centre moves left → negative shift.
+        double screenShiftRight = -clampedRight;
+        double screenShiftUp    = -clampedUp;
+
+        // Fixed virtual screen distance — determines FOV only, never changes.
+        double virtualScreenDist = VIRTUAL_SCREEN_DIST;
 
         double halfFovW = portalHalfW / virtualScreenDist;
         double halfFovH = portalHalfH / virtualScreenDist;
@@ -250,8 +262,10 @@ public class LocalizedChunkCapture {
                 break;
             }
             for (int px = 0; px < resW; px++) {
-                double ndcX =  (2.0 * px + 1.0) / resW - 1.0;
-                double ndcY = 1.0 - (2.0 * py + 1.0) / resH;
+                // NDC in [-1..1], then offset by screen shift (in portal-half-extent units).
+                // screenShiftRight/Up are in world units at the virtual screen plane.
+                double ndcX =  (2.0 * px + 1.0) / resW - 1.0 + screenShiftRight / portalHalfW;
+                double ndcY = 1.0 - (2.0 * py + 1.0) / resH + screenShiftUp    / portalHalfH;
 
                 double rdX = fwdX + rightX * ndcX * halfFovW + upX * ndcY * halfFovH;
                 double rdY = fwdY +                            upY * ndcY * halfFovH;
