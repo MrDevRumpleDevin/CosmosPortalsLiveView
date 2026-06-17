@@ -89,7 +89,7 @@ public class LocalizedChunkCapture {
      * (partial frame rather than a full freeze/stale hold).
      * 80 ms gives a comfortable margin below 100 ms interval at cost of occasional partial renders.
      */
-    private static final long RENDER_BUDGET_NS = 200_000_000L; // 200 ms
+    private static final long RENDER_BUDGET_NS = 500_000_000L; // 500 ms — enough for any single portal to complete
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -232,115 +232,82 @@ public class LocalizedChunkCapture {
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── Eye position — FIXED at destination, independent of player position ──
+        // ── Orthographic projection — the portal IS the camera sensor ────────
         //
-        // The portal quad is a static window into the destination world.
-        // The scene on the other side must NOT translate when the player moves —
-        // only the visible slice through the portal hole changes.
+        // Every pixel fires a ray in the SAME direction (fwd). There is no
+        // perspective, no FOV, no fisheye. The portal quad maps 1:1 to a same-sized
+        // window at the destination — like cutting a hole in space.
         //
-        // Eye is placed EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane.
-        // Wand destOffsets shift the eye for manual framing only.
-        // parallaxRight/Up do NOT move the eye — they only affect frustum slopes below.
+        // Pixel origin = destBase + right*pixelX + up*pixelY + parallaxRight shift.
+        // parallaxRight shifts ALL ray origins laterally together, so standing to the
+        // right of the portal reveals the left side of the destination (peek effect).
+        // Player distance (parallaxForward) does NOT change the image at all —
+        // backing away just makes the quad smaller on screen, not different content.
         //
-        // eyeY is set to the VERTICAL CENTER of the portal hole (portalBottomY + portalHalfH).
-        // This makes vertical slopes perfectly symmetric about the center, so the scene
-        // does NOT swim up/down as the player walks toward or away from the portal.
-        // (Previously eye was at portalBottomY + 1.62, which caused the slope midpoint
-        //  to drift as D changed, making the view scroll vertically with distance.)
-        double eyeX = eyePos.getX() + 0.5
+        // destBase: bottom-left corner of the destination window in world space.
+        //   X/Z: dest block center + fwdOffset (EYE_FORWARD_OFFSET behind face)
+        //        + parallaxRight shifts the whole window laterally
+        //   Y:   portalBottomY — bottom of portal, so bottom pixel = floor always.
+        double baseX = eyePos.getX() + 0.5
                 + fwdX * (EYE_FORWARD_OFFSET + destOffsetForward)
-                + rightX * destOffsetRight;
-        double eyeY = portalBottomY + portalHalfH + destOffsetUp;
-        double eyeZ = eyePos.getZ() + 0.5
+                + rightX * (destOffsetRight + parallaxRight);
+        double baseY = portalBottomY + destOffsetUp;
+        double baseZ = eyePos.getZ() + 0.5
                 + fwdZ * (EYE_FORWARD_OFFSET + destOffsetForward)
-                + rightZ * destOffsetRight;
+                + rightZ * (destOffsetRight + parallaxRight);
 
-        // ── D: player distance from the portal face ──────────────────────────
-        // parallaxForward = signed distance from player to portal CENTER.
-        // Subtract 0.5 to get distance to the portal face.
-        // Clamped to min 0.1 so slopes stay finite when inside the portal.
-        double D = Math.max(0.1, Math.abs(parallaxForward) - 0.5);
+        // Portal dimensions in world units
+        double portalWidth  = portalHalfW * 2.0;
+        double portalHeight = portalHalfH * 2.0;
 
-        // ── Frustum slopes: aperture/window model ────────────────────────────
-        //
-        // The eye is FIXED at the destination — eyeX/Y/Z have no D dependence,
-        // so the scene never translates when the player moves forward/back.
-        //
-        // D controls the ANGLE of the frustum only:
-        //   close  → D small → slopes steep  → wide view (see more of the other side)
-        //   far    → D large → slopes shallow → narrow view (like peeking through a slot)
-        //
-        // Vertical center never drifts because eyeY = portal vertical center,
-        // making slopeTop and slopeBottom symmetric (sum = 0) for any D.
-        //
-        // Horizontal center shifts by parallaxRight/D for the peek effect.
-        double slopeRight  = ( portalHalfW - parallaxRight) / D;
-        double slopeLeft   = (-portalHalfW - parallaxRight) / D;
-        double slopeTop    =  portalHalfH / D;
-        double slopeBottom = -portalHalfH / D;
-
-        // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
-        double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
-        double slopeDeltaV = slopeBottom - slopeTop;   // vertical slope span (slopeBottom < slopeTop)
+        // Per-pixel world-space step sizes (orthographic: pixel maps to world unit)
+        // ndcX=0 → left edge (-halfW from center), ndcX=1 → right edge (+halfW)
+        // ndcY=0 → top of image (portal top), ndcY=1 → bottom (portal floor)
+        // We offset baseX/Z to the LEFT edge of the portal here so the loop just
+        // adds pixelX * stepRight each column.
+        double leftEdgeX = baseX - rightX * portalHalfW;
+        double leftEdgeZ = baseZ - rightZ * portalHalfW;
 
         float[] depthBuf = new float[resW * resH];
-        int skyAbgr = toABGR(computeSkyColor(0));
 
         for (int py = 0; py < resH; py++) {
-            // Budget check once per scanline — avoids nanoTime() overhead per pixel.
-            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) {
-                // Budget exceeded — leave remaining rows as zero (transparent).
-                // The portal's own colour layer shows through, no sky-blue band.
-                break;
-            }
-            // ndcY: 0 = top of image (portal top), 1 = bottom (portal floor)
+            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) break;
+
+            // ndcY=0 → top of portal, ndcY=1 → bottom (floor)
+            // Flip: py=0 is top of image, maps to portal TOP (highest Y)
             double ndcY = (py + 0.5) / resH;
-            double slopeV = slopeTop + ndcY * slopeDeltaV; // vertical slope for this row
+            // worldY: py=0 → portalBottomY + portalHeight (top), py=resH-1 → portalBottomY (floor)
+            double worldY = baseY + portalHeight * (1.0 - ndcY);
 
             for (int px = 0; px < resW; px++) {
-                // ndcX: 0 = left of image, 1 = right of image
+                // ndcX=0 → left edge, ndcX=1 → right edge
                 double ndcX = (px + 0.5) / resW;
-                double slopeH = slopeLeft + ndcX * slopeDeltaH; // horizontal slope for this column
+                // worldX/Z: slide along the right axis across the portal width
+                double originX = leftEdgeX + rightX * (portalWidth * ndcX);
+                double originZ = leftEdgeZ + rightZ * (portalWidth * ndcX);
 
-                // Ray direction: forward + lateral*slopeH + up*slopeV
-                double rdX = fwdX + rightX * slopeH + upX * slopeV;
-                double rdY = fwdY              + upY * slopeV;
-                double rdZ = fwdZ + rightZ * slopeH + upZ * slopeV;
-
-                double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
-                if (len < 1e-9) {
-                    image.setPixelRGBA(px, py, toABGR(computeSkyColor(0)));
-                    depthBuf[py * resW + px] = MAX_RAY_DIST;
-                    continue;
-                }
-                rdX /= len; rdY /= len; rdZ /= len;
-
+                // All rays fire in exactly the same direction — pure orthographic
                 int[] hitColor = new int[1];
-                float dist = ddaRay(level, eyeX, eyeY, eyeZ, rdX, rdY, rdZ, hitColor);
+                float dist = ddaRay(level, originX, worldY, originZ, fwdX, fwdY, fwdZ, hitColor);
 
                 image.setPixelRGBA(px, py, toABGR(hitColor[0]));
                 depthBuf[py * resW + px] = dist;
             }
         }
 
-        // Entity dots
+        // Entity dots — orthographic projection
         for (EntityDot dot : entityDots) {
-            double dx = dot.x() - eyeX;
-            double dy = dot.y() - eyeY;
-            double dz = dot.z() - eyeZ;
-            double depth = dx * fwdX + dy * fwdY + dz * fwdZ;
-            if (depth < 0.5) continue;
-            double projX = dx * rightX              + dz * rightZ;
-            double projY = dx * upX + dy * upY + dz * upZ;
-            // Aperture frustum: map projected slope back to pixel coordinates.
-            // slopeH = projX/depth, maps from [slopeLeft..slopeRight] → [0..resW]
-            // slopeV = projY/depth, maps from [slopeTop..slopeBottom]  → [0..resH]
-            double entitySlopeH = projX / depth;
-            double entitySlopeV = projY / depth;
-            // ndcX in [0..1]: (slopeH - slopeLeft) / slopeDeltaH
-            int screenX = (int)((entitySlopeH - slopeLeft) / slopeDeltaH * resW);
-            // ndcY in [0..1]: (slopeV - slopeTop) / slopeDeltaV  (slopeDeltaV is slopeBottom-slopeTop, negative when up > down)
-            int screenY = (int)((entitySlopeV - slopeTop)  / slopeDeltaV * resH);
+            // Project entity world position onto the portal plane
+            double ex = dot.x() - leftEdgeX;
+            double ey = dot.y() - baseY;
+            double ez = dot.z() - leftEdgeZ;
+            double depth = ex * fwdX + ey * fwdY + ez * fwdZ;
+            if (depth < 0.1) continue;
+            // Orthographic: project onto right/up axes directly (no divide by depth)
+            double projX = ex * rightX + ez * rightZ;
+            double projY = ey; // up is world Y
+            int screenX = (int)(projX / portalWidth  * resW);
+            int screenY = (int)((1.0 - projY / portalHeight) * resH);
             int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
             for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
                 for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
