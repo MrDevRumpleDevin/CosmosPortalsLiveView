@@ -41,6 +41,12 @@ public class PortalViewData {
     public volatile float portalHalfH = 1.0f;
 
     /**
+     * World Y of the lowest portal block's floor (integer — the minY block's bottom face).
+     * Used by the raycaster to anchor the eye at the correct height above the destination floor.
+     */
+    public volatile float portalBottomY = 0f;
+
+    /**
      * Player's lateral offset from the portal center projected onto the portal's
      * right and up axes. Updated each render frame on the main thread.
      * Consumed by captureAsync to shift the virtual camera, producing parallax.

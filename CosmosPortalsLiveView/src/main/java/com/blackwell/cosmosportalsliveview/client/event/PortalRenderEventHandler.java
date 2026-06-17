@@ -399,6 +399,7 @@ public class PortalRenderEventHandler {
             float hw = isXAxis ? (maxX - minX) / 2.0f + 0.5f : (maxZ - minZ) / 2.0f + 0.5f;
             data.portalHalfW = hw;
             data.portalHalfH = halfH;
+            data.portalBottomY = (float) minY; // world Y of lowest portal block floor
         }
 
         // Base offset: -0.52 pushes the quad inward (toward the player's side of the portal,
@@ -425,7 +426,8 @@ public class PortalRenderEventHandler {
         {
             Vec3 camPos3 = camera.getPosition();
             double pex = camPos3.x - centerX;
-            double pey = camPos3.y - (centerY + PLAYER_EYE_HEIGHT);
+            // Eye height above the portal floor (raw — used directly as destination eyeY offset)
+            double pey = camPos3.y - minY;
             double pez = camPos3.z - centerZ;
 
             if (isXAxis) {
