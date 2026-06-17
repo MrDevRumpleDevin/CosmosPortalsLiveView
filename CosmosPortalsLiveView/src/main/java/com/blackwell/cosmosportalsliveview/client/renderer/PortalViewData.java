@@ -117,6 +117,16 @@ public class PortalViewData {
         return (currentTime - lastCaptureTime) >= captureInterval || needsUpdate;
     }
 
+    /**
+     * Stamps lastCaptureTime to now. Called at submission (not completion) so
+     * shouldUpdateCapture backs off immediately, preventing this portal from
+     * consuming every capturedThisFrame slot while its job is queued/running.
+     */
+    public void stampCaptureTime() {
+        this.lastCaptureTime = System.currentTimeMillis();
+        this.needsUpdate = false;
+    }
+
     public DynamicTexture getTexture() {
         return liveViewTexture;
     }
@@ -127,11 +137,9 @@ public class PortalViewData {
         }
         this.liveViewTexture = texture;
         this.textureVersion++;
-        // Set lastCaptureTime to 0 so shouldUpdateCapture fires immediately on the next
-        // render frame after this one completes. captureInFlight prevents overlap.
-        // The config captureIntervalMs now acts as a floor only when the raycaster is fast;
-        // when it's slow the next capture starts as soon as the previous finishes.
-        this.lastCaptureTime = 0;
+        // Do NOT reset lastCaptureTime here — it was already stamped at submission time.
+        // Resetting it to 0 on completion caused a tight re-fire loop that produced flicker
+        // (texture re-registered every frame) and starved other portals of executor time.
         this.needsUpdate = false;
     }
 

@@ -67,13 +67,21 @@ public class LocalizedChunkCapture {
      */
     private static final int VERTEX_STRIDE = 8;
 
-    private static final ExecutorService CAPTURE_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "CosmosLiveView-Capture");
-        t.setDaemon(true);
-        // Slightly below normal so the render thread is not starved.
-        t.setPriority(Thread.NORM_PRIORITY - 1);
-        return t;
-    });
+    // Per-portal executor map: each portal gets its own single-thread executor so
+    // portal B is never blocked waiting behind portal A's 200 ms raycaster job.
+    private static final java.util.concurrent.ConcurrentHashMap<Long, ExecutorService> PORTAL_EXECUTORS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static ExecutorService executorFor(BlockPos portalPos) {
+        return PORTAL_EXECUTORS.computeIfAbsent(portalPos.asLong(), k ->
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "CosmosLiveView-Capture-" + k);
+                t.setDaemon(true);
+                t.setPriority(Thread.NORM_PRIORITY - 1);
+                return t;
+            })
+        );
+    }
 
     /**
      * Per-frame budget for the raycaster in nanoseconds.
@@ -109,6 +117,9 @@ public class LocalizedChunkCapture {
         }
 
         portalData.setCaptureInFlight(true);
+        // Stamp time NOW (at submission) so shouldUpdateCapture backs off for this portal
+        // immediately, freeing capturedThisFrame slots for other portals next frame.
+        portalData.stampCaptureTime();
 
         final List<EntityDot> entityDots = snapshotEntities(sampleLevel, portalData.destPos);
 
@@ -130,7 +141,7 @@ public class LocalizedChunkCapture {
         final float destOffsetUp     = portalData.destOffsetUp;
         final float destOffsetForward = portalData.destOffsetForward;
 
-        CAPTURE_EXECUTOR.submit(() -> {
+        executorFor(portalData.portalPos).submit(() -> {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
@@ -244,26 +255,29 @@ public class LocalizedChunkCapture {
                 + fwdZ * (EYE_FORWARD_OFFSET + destOffsetForward)
                 + rightZ * destOffsetRight;
 
-        // ── Frustum slopes: fixed-eye model (no forward/back drift) ──────────
-        //
-        // The eye is fixed at the destination — it never moves when the player
-        // walks toward or away from the portal. Therefore the cast rays must also
-        // be fixed: we define them relative to a constant reference depth equal to
-        // abs(EYE_FORWARD_OFFSET) = 0.5, which is the eye-to-portal-face distance.
-        //
-        // Using D (player distance) here was the bug: as the player walked closer
-        // D shrank, slopes steepened, and the scene appeared to rush forward.
-        //
-        // FIXED_EYE_DEPTH replaces D for ALL slope calculations.
-        // parallaxRight still shifts the horizontal slopes to produce the correct
-        // left/right peek effect — that part is unchanged.
-        // parallaxForward is no longer used in the raycaster at all.
-        final double FIXED_EYE_DEPTH = Math.abs(EYE_FORWARD_OFFSET); // 0.5
+        // ── D: player distance from the portal face ──────────────────────────
+        // parallaxForward = signed distance from player to portal CENTER.
+        // Subtract 0.5 to get distance to the portal face.
+        // Clamped to min 0.1 so slopes stay finite when inside the portal.
+        double D = Math.max(0.1, Math.abs(parallaxForward) - 0.5);
 
-        double slopeRight  = ( portalHalfW - parallaxRight) / FIXED_EYE_DEPTH;
-        double slopeLeft   = (-portalHalfW - parallaxRight) / FIXED_EYE_DEPTH;
-        double slopeTop    =  portalHalfH / FIXED_EYE_DEPTH;
-        double slopeBottom = -portalHalfH / FIXED_EYE_DEPTH;
+        // ── Frustum slopes: aperture/window model ────────────────────────────
+        //
+        // The eye is FIXED at the destination — eyeX/Y/Z have no D dependence,
+        // so the scene never translates when the player moves forward/back.
+        //
+        // D controls the ANGLE of the frustum only:
+        //   close  → D small → slopes steep  → wide view (see more of the other side)
+        //   far    → D large → slopes shallow → narrow view (like peeking through a slot)
+        //
+        // Vertical center never drifts because eyeY = portal vertical center,
+        // making slopeTop and slopeBottom symmetric (sum = 0) for any D.
+        //
+        // Horizontal center shifts by parallaxRight/D for the peek effect.
+        double slopeRight  = ( portalHalfW - parallaxRight) / D;
+        double slopeLeft   = (-portalHalfW - parallaxRight) / D;
+        double slopeTop    =  portalHalfH / D;
+        double slopeBottom = -portalHalfH / D;
 
         // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
         double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
