@@ -202,53 +202,37 @@ public class LocalizedChunkCapture {
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── Pure-rotation parallax — "camera on a tripod" model ────────────────
-        // Camera origin stays fixed. Forward distance has NO effect on the rotation —
-        // getting closer/farther doesn't zoom or change the view, only side-to-side
-        // (and small up/down) movement of the player shifts what you see.
+        // ── "Hole in wall" parallax — eye translation model ────────────────────
+        // The virtual camera position shifts laterally/vertically at the destination
+        // to match where the player stands relative to the portal centre.
+        // Direction never rotates — the view always looks straight through.
         //
-        // angle (radians) = lateralOffset * scale
-        //   parallaxRight > 0  →  player RIGHT of portal → camera turns LEFT
-        //   parallaxUp > 0     →  player above portal centre → camera tilts DOWN
+        // parallaxRight: signed lateral offset (sign already corrected in EventHandler
+        //   so positive = player to the right → eye shifts right at destination).
+        // parallaxUp: signed vertical offset from portal centre (player eye height
+        //   relative to portal centre; PLAYER_EYE_HEIGHT already subtracted in EventHandler).
+        // parallaxForward: signed distance from portal face (positive = near side,
+        //   negative = far side). Magnitude determines the virtual screen distance —
+        //   further away → frustum widens naturally to match portal size; up close
+        //   the frustum is tight so the portal fills the screen seamlessly.
         //
-        // Up-component is deliberately damped (×0.25) — you mostly care about
-        // left/right parallax, vertical is a subtle secondary effect.
-        //
-        // parallaxForward is no longer used for angle computation; kept in signature
-        // for possible future use (e.g. distance-based capture interval scaling).
+        // FOV: virtual screen plane at distance |parallaxForward| from eye.
+        //   halfFovW = portalHalfW / virtualScreenDist
+        //   → at the portal face the frustum exactly spans the portal opening.
+        //   Min-clamped to 0.5 so we never divide by near-zero.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-        double angleYaw   = -(double)(parallaxRight * scale) * 0.4;   // radians, lateral only
-        double anglePitch = -(double)(parallaxUp    * scale) * 0.1;   // damped — subtle vertical
 
-        // Step 1: yaw rotation around world-up (0,1,0).
-        double cosY = Math.cos(angleYaw), sinY = Math.sin(angleYaw);
-        double fwdX2 = fwdX * cosY - fwdZ * sinY;
-        double fwdZ2 = fwdX * sinY + fwdZ * cosY;
-        double fwdY2 = fwdY; // 0
-        double rX2   = rightX * cosY - rightZ * sinY;
-        double rZ2   = rightX * sinY + rightZ * cosY;
+        double virtualScreenDist = Math.max(0.5, Math.abs((double) parallaxForward));
 
-        // Step 2: pitch rotation around the (yaw-rotated) right axis.
-        // cross(right2, fwd2): right2=(rX2,0,rZ2), fwd2=(fwdX2,0,fwdZ2) — fwdY2=0
-        double cosP = Math.cos(anglePitch), sinP = Math.sin(anglePitch);
-        double crossX = -rZ2 * fwdY2;               // = 0 when fwdY2=0
-        double crossY =  rZ2 * fwdX2 - rX2 * fwdZ2;
-        double crossZ =  rX2 * fwdY2;               // = 0 when fwdY2=0
-        double fwdX3 = fwdX2 * cosP + crossX * sinP;
-        double fwdY3 = fwdY2 * cosP + crossY * sinP;
-        double fwdZ3 = fwdZ2 * cosP + crossZ * sinP;
+        // Shift the eye laterally by the player's offset (scaled).
+        // Right axis: (rightX, 0, rightZ). Up axis: world-up (0,1,0).
+        // Vertical damped ×0.3 — subtle secondary effect.
+        eyeX += rightX * parallaxRight * scale;
+        eyeZ += rightZ * parallaxRight * scale;
+        eyeY += upY    * parallaxUp    * scale * 0.3;
 
-        // Recompute up = cross(right2, fwd3) to keep orthonormal basis.
-        double upX3 =               -rZ2 * fwdY3;
-        double upY3 =  rZ2 * fwdX3 - rX2 * fwdZ3;
-        double upZ3 =  rX2 * fwdY3;
-
-        fwdX = fwdX3; fwdY = fwdY3; fwdZ = fwdZ3;
-        rightX = rX2; rightZ = rZ2;
-        upX = upX3;   upY = upY3; upZ = upZ3;
-
-        double halfFovW = portalHalfW / VIRTUAL_SCREEN_DIST;
-        double halfFovH = portalHalfH / VIRTUAL_SCREEN_DIST;
+        double halfFovW = portalHalfW / virtualScreenDist;
+        double halfFovH = portalHalfH / virtualScreenDist;
 
         float[] depthBuf = new float[resW * resH];
 

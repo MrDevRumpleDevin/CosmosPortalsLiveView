@@ -403,39 +403,44 @@ public class PortalRenderEventHandler {
         // previous test where +0.52 went away from the player.
         // The per-dock offset (cycled with sneak+right-click wand) is added on top.
         // ── Parallax: project camera offset onto portal-local axes ─────────────
-        // Portal right/up vectors:
-        //   axis=X (face normal ±Z): right=+X, up=+Y
-        //   axis=Z (face normal ±X): right=+Z, up=+Y
-        // Player eye offset from portal center, projected onto those axes.
+        // Project camera offset onto portal-local axes.
+        //   axis=X (face normal ±Z): right=+X, up=+Y, forward=+Z
+        //   axis=Z (face normal ±X): right=+Z, up=+Y, forward=+X
+        //
+        // parallaxOffsetForward is stored SIGNED so the raycaster knows which side
+        // of the portal the player is on.  The right-axis direction must be flipped
+        // for the back face (negative forward) to keep "move right → see left" correct
+        // from both sides.
+        //
+        // parallaxOffsetRight stores the lateral offset in portal-local space,
+        // already sign-corrected: positive = player to the viewer's right.
+        // When forward < 0 the viewer is on the back face, so "right" in world space
+        // is the opposite portal-local direction — we negate it.
+        //
+        // parallaxOffsetUp: eye height normalized so standing at floor in front of a
+        // floor-to-ceiling portal gives ~0.  We subtract PLAYER_EYE_HEIGHT.
         {
             Vec3 camPos3 = camera.getPosition();
             double pex = camPos3.x - centerX;
-            // Normalize Y: subtract eye height so that a player standing at resting
-            // position in front of the portal has pey≈0.  This prevents the camera
-            // from permanently tilting up just because the eye is 1.62 blocks above
-            // the floor while the portal geometric center is at mid-height.
-            // centerY is the vertical mid-point of the portal frame.  A player
-            // standing on the floor in front of a floor-to-ceiling portal that spans
-            // Y=0..2 has centerY=1.5 and camPos3.y = floorY + 1.62 ≈ 1.62,
-            // so raw pey = +0.12 — tiny, fine.  But we still subtract PLAYER_EYE_HEIGHT
-            // so the neutral position (eye at portal centre height) gives exactly 0.
             double pey = camPos3.y - (centerY + PLAYER_EYE_HEIGHT);
             double pez = camPos3.z - centerZ;
-            // Raw offsets — no negation here.
-            // The rotation direction is set in renderPerspectiveView:
-            //   positive parallaxRight → player is to the RIGHT of portal centre
-            //   → atan2(+right, fwd) is positive → yaw rotates left (sees more left at dest)
-            //   This matches the expected door/window behaviour.
-            //   axis=X (face normal ±Z): right=X, up=Y, forward=Z
-            //   axis=Z (face normal ±X): right=Z, up=Y, forward=X
+
             if (isXAxis) {
-                data.parallaxOffsetRight   = (float)(pex);
-                data.parallaxOffsetUp      = (float)(pey);
-                data.parallaxOffsetForward = (float)  Math.abs(pez);
+                // forward = pez (signed): +Z side or -Z side
+                double fwd = pez;
+                // right = pex, but flip sign on back face so "move right" always means
+                // the same direction relative to what you see through the portal.
+                double right = (fwd >= 0) ? pex : -pex;
+                data.parallaxOffsetRight   = (float) right;
+                data.parallaxOffsetUp      = (float) pey;
+                data.parallaxOffsetForward = (float) fwd;
             } else {
-                data.parallaxOffsetRight   = (float)(pez);
-                data.parallaxOffsetUp      = (float)(pey);
-                data.parallaxOffsetForward = (float)  Math.abs(pex);
+                // forward = pex (signed): +X side or -X side
+                double fwd = pex;
+                double right = (fwd >= 0) ? pez : -pez;
+                data.parallaxOffsetRight   = (float) right;
+                data.parallaxOffsetUp      = (float) pey;
+                data.parallaxOffsetForward = (float) fwd;
             }
         }
 

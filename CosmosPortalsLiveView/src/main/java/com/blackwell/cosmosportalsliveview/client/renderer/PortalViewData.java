@@ -44,11 +44,16 @@ public class PortalViewData {
      * Player's lateral offset from the portal center projected onto the portal's
      * right and up axes. Updated each render frame on the main thread.
      * Consumed by captureAsync to shift the virtual camera, producing parallax.
+     *
+     * parallaxOffsetForward is SIGNED:
+     *   axis=X portals: positive = player on +Z side (south face), negative = -Z side (north face)
+     *   axis=Z portals: positive = player on +X side (west face),  negative = -X side (east face)
+     * The sign tells the raycaster which side the viewer is on, so it can flip
+     * the right-axis direction accordingly.
      */
     public volatile float parallaxOffsetRight   = 0f;
     public volatile float parallaxOffsetUp      = 0f;
-    /** Distance along the portal face normal (positive = in front of portal). */
-    public volatile float parallaxOffsetForward = 2.0f; // default = VIRTUAL_SCREEN_DIST
+    public volatile float parallaxOffsetForward = 2.0f; // signed — see above
 
     private final Set<ChunkPos> cachedChunks = new HashSet<>();
     private boolean needsUpdate = true;
