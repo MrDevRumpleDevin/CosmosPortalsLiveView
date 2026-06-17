@@ -67,7 +67,6 @@ public class PortalViewData {
     // Smoothed values — interpolated toward the raw offsets each frame.
     public volatile float smoothParallaxRight   = 0f;
     public volatile float smoothParallaxUp      = 0f;
-    public volatile float smoothParallaxForward = 2.0f;
 
     /** Exponential smoothing factor per frame (0=no smoothing, 1=instant). 0.18 ≈ ~5 frame blend. */
     public static final float PARALLAX_SMOOTH = 0.18f;

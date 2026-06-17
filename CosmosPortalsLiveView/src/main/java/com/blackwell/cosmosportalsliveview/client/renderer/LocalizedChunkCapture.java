@@ -123,7 +123,7 @@ public class LocalizedChunkCapture {
         // interpolated offset — eliminates jumps from async timing gaps.
         final float parallaxRight   = portalData.smoothParallaxRight;
         final float parallaxUp      = portalData.smoothParallaxUp;
-        final float parallaxForward = portalData.smoothParallaxForward;
+        final float parallaxForward = portalData.parallaxOffsetForward; // forward only used for sign
         final float portalBottomY   = portalData.portalBottomY;
 
         CAPTURE_EXECUTOR.submit(() -> {
@@ -201,63 +201,68 @@ public class LocalizedChunkCapture {
         double fwdY =  0.0;
         double fwdZ =  Math.cos(yawRad);
 
-        // ── Eye position: player's viewpoint projected through the portal ────────
-        //
-        // The portal is a hole in the wall. What you see through it is exactly what
-        // you'd see if you teleported to the destination with the same relative position:
-        //   - parallaxRight : lateral offset from portal centre → eye moves right/left at dest
-        //   - parallaxUp    : eye height above source portal floor → same height above dest floor
-        //   - parallaxForward: how far in front of the portal the player is → eye is that far
-        //                      BEHIND the dest portal plane (inside the dest room)
-        //
-        // EYE_FORWARD_OFFSET is the minimum depth behind the dest plane (prevents z-clipping).
-        // Player distance adds on top: further away → eye further into the room → wider view.
-        float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-
-        // Forward: player is |parallaxForward| blocks in front of source portal.
-        // At dest the eye is that same distance behind the dest portal plane.
-        // parallaxForward is signed (positive = player on the "front" face).
-        // We always want eye behind the dest plane, so we use abs and add the fixed offset.
-        double forwardDepth = Math.abs(parallaxForward) + Math.abs(EYE_FORWARD_OFFSET);
-        // Clamp: don't let the eye go more than MAX_RAY_DIST/2 behind the portal
-        forwardDepth = Math.min(forwardDepth, MAX_RAY_DIST / 2.0);
-
-        // Lateral: player offset from portal centre, mirrored at destination.
-        // parallaxRight already has sign-correction for which face the player is on.
-        double eyeRight = parallaxRight * scale;
-        // Cap at ±20 blocks sanity limit
-        eyeRight = Math.max(-20.0, Math.min(20.0, eyeRight));
-
-        // Vertical: player eye height above source portal floor = same above dest portal floor.
-        double eyeHeight = parallaxUp; // camPos.y - minY, already computed in EventHandler
+        // Eye at portal destination, pushed back by EYE_FORWARD_OFFSET.
+        // eyeY is anchored to the destination portal floor (portalBottomY) plus the player's
+        // raw eye height above the source portal floor (parallaxUp), clamped to the portal opening.
+        double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET;
+        double rawEyeY = portalBottomY + parallaxUp;
+        double eyeYMin = portalBottomY;
+        double eyeYMax = portalBottomY + portalHalfH * 2.0f;
+        double eyeY = Math.max(eyeYMin, Math.min(eyeYMax, rawEyeY)) + fwdY * EYE_FORWARD_OFFSET;
+        double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET;
 
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
+        // rightY = 0 (always horizontal)
 
+        // up is always world-up when pitch=0
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;
 
-        // Eye sits at dest portal centre + player offsets
-        double eyeX = eyePos.getX() + 0.5
-                    + fwdX * forwardDepth        // pushed back into the dest room
-                    + rightX * eyeRight;          // lateral shift matches player
-        double eyeY = portalBottomY + eyeHeight; // same height above dest floor as source floor
-        double eyeZ = eyePos.getZ() + 0.5
-                    + fwdZ * forwardDepth
-                    + rightZ * eyeRight;
+        // ── Doorway / off-axis projection ─────────────────────────────────────
+        // The eye is FIXED behind the portal centre at EYE_FORWARD_OFFSET depth.
+        // The portal opening is the aperture. When the player moves laterally
+        // relative to the portal, the visible "window" into the destination shifts
+        // — you see more of one side, less of the other. This is exactly an
+        // off-axis (asymmetric) frustum: eye stays put, the screen-plane centre moves.
+        //
+        // Implementation:
+        //   The virtual screen plane sits at distance VIRTUAL_SCREEN_DIST in front
+        //   of the eye. Its half-extents are (portalHalfW, portalHalfH) — so the
+        //   frustum exactly spans the portal opening at that distance (no zoom in/out).
+        //
+        //   parallaxRight: player's lateral offset from portal centre in portal-space.
+        //   Player moves right → they see more of the right side of the destination
+        //   → screen centre shifts LEFT in NDC → we subtract from screenCentreX.
+        //   Clamped to ±portalHalfW so you can't pan past the edge of the portal.
+        //
+        // Eye does NOT translate — no wall clipping.
+        float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
 
-        // ── FOV: fixed to portal aperture size, screen at distance 1.0 ────────
-        // The portal opening defines exactly how wide/tall the view is.
-        // Screen distance = 1.0 means halfFov = portalHalfW/H in world units.
-        // No zoom in/out based on player distance — only position changes.
+        // Off-axis screen shift: wide clamp on horizontal — allow player to pan far left/right
+        // (up to ~180°: player standing at the portal wall can see the wall behind on the other side).
+        // Cap at ±20 blocks as a sanity limit only.
+        float clampedRight = (float) Math.max(-20.0f, Math.min(20.0f, parallaxRight * scale));
+
+        // Vertical screen shift: deviation from resting eye height (PLAYER_EYE_HEIGHT above floor).
+        // At rest, parallaxUp ≈ 1.62, so screenShiftUp = 0 → portal center is at resting eye level.
+        // Crouching or jumping shifts the view up/down naturally.
+        final float REST_EYE_HEIGHT = 1.62f;
+        float verticalDeviation = parallaxUp - REST_EYE_HEIGHT;
+        float clampedUp = (float) Math.max(-portalHalfH * 2.0f, Math.min(portalHalfH * 2.0f, verticalDeviation * scale));
+
+        // Shift of the screen centre in world units at the virtual screen plane.
+        // Positive parallaxRight (player right of centre) → screen centre shifts right → see more left wall.
+        // Vertical: deviation from rest position, so standing normally = centered view.
+        double screenShiftRight = +clampedRight;
+        double screenShiftUp    = -clampedUp;
+
+        // Fixed virtual screen distance — determines FOV only, never changes.
         double virtualScreenDist = VIRTUAL_SCREEN_DIST;
+
         double halfFovW = portalHalfW / virtualScreenDist;
         double halfFovH = portalHalfH / virtualScreenDist;
-
-        // No screen shift — eye position does all the work.
-        double screenShiftRight = 0.0;
-        double screenShiftUp    = 0.0;
 
         float[] depthBuf = new float[resW * resH];
         int skyAbgr = toABGR(computeSkyColor(0));
