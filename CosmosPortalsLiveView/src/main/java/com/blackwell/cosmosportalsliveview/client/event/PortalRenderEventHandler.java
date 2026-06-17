@@ -5,8 +5,10 @@ import com.blackwell.cosmosportalsliveview.config.PortalLiveViewConfig;
 import com.blackwell.cosmosportalsliveview.client.renderer.LocalizedChunkCapture;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalLiveViewManager;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalViewData;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import org.joml.Matrix4f;
 
 import com.tcn.cosmosportals.core.block.BlockPortal;
@@ -259,6 +261,11 @@ public class PortalRenderEventHandler {
             );
 
             renderPortalFrame(poseStack, bufferSource, data, texLoc, camera, level, dockPos);
+
+            // ── Wireframe: draw dest hole outline at destination coords ────────
+            if (LiveViewState.isWireframeEnabled(dockPos) && data.destPos != null) {
+                renderDestWireframe(poseStack, bufferSource, data, camera, level);
+            }
         }
 
         bufferSource.endBatch();
@@ -514,6 +521,109 @@ public class PortalRenderEventHandler {
             consumer.vertex(matrix, -fx,  halfH, -halfW).color(255,255,255,255).uv(1f,0f).overlayCoords(0,10).uv2(0xF000F0).normal(-1,0,0).endVertex();
         }
 
+        poseStack.popPose();
+    }
+
+    /**
+     * Renders a wireframe box at the destination "hole" — the region of world space
+     * that the live-view eye looks out from.
+     *
+     * The box is centred at:
+     *   destPos + 0.5 (block centre) + fwd*EYE_FORWARD_OFFSET + destOffsets
+     * and has dimensions  portalHalfW × portalHalfH (half-extents).
+     *
+     * Drawn with RenderType.LINES so it requires no texture and ignores depth (always visible).
+     */
+    private static void renderDestWireframe(PoseStack poseStack,
+                                             MultiBufferSource.BufferSource bufferSource,
+                                             PortalViewData data,
+                                             Camera camera,
+                                             Level level) {
+        // Reconstruct dest eye centre (same math as LocalizedChunkCapture)
+        double yawRad = Math.toRadians(data.destYaw);
+        double fwdX = -Math.sin(yawRad);
+        double fwdZ =  Math.cos(yawRad);
+        double rightX =  Math.cos(yawRad);
+        double rightZ =  Math.sin(yawRad);
+
+        final float EYE_FORWARD_OFFSET = -0.5f;
+
+        double cx = data.destPos.getX() + 0.5
+                + fwdX * (EYE_FORWARD_OFFSET + data.destOffsetForward)
+                + rightX * data.destOffsetRight;
+        double cy = data.portalBottomY + data.portalHalfH + data.destOffsetUp;
+        double cz = data.destPos.getZ() + 0.5
+                + fwdZ * (EYE_FORWARD_OFFSET + data.destOffsetForward)
+                + rightZ * data.destOffsetRight;
+
+        float hw = data.portalHalfW;
+        float hh = data.portalHalfH;
+
+        // The box right-axis is the portal right-vector (in world XZ), up is Y.
+        // We express the 8 corners in world space.
+        double[] cornersX = new double[8];
+        double[] cornersY = new double[8];
+        double[] cornersZ = new double[8];
+        int i = 0;
+        for (float sx : new float[]{-hw, hw}) {
+            for (float sy : new float[]{-hh, hh}) {
+                cornersX[i] = cx + rightX * sx;
+                cornersY[i] = cy + sy;
+                cornersZ[i] = cz + rightZ * sx;
+                i++;
+            }
+        }
+        // corner index layout:
+        //  0: left-bottom,  1: left-top,  2: right-bottom,  3: right-top
+        // Front (fwd) and back are the same box (it's flat along fwd), but we draw
+        // two parallel face rectangles offset ±0.05 along fwd to give the wireframe depth.
+        final double THICK = 0.05;
+        double[][] faces = {
+            // front offset
+            { cx + fwdX*THICK, cy, cz + fwdZ*THICK },
+            // back offset
+            { cx - fwdX*THICK, cy, cz - fwdZ*THICK }
+        };
+
+        double camX = camera.getPosition().x;
+        double camY = camera.getPosition().y;
+        double camZ = camera.getPosition().z;
+
+        // Wireframe colour: bright cyan, full alpha
+        float r = 0f, g = 1f, b = 1f, a = 1f;
+
+        poseStack.pushPose();
+        poseStack.translate(cx - camX, cy - camY, cz - camZ);
+
+        RenderType linesType = RenderType.lines();
+        VertexConsumer vc = bufferSource.getBuffer(linesType);
+        Matrix4f mat = poseStack.last().pose();
+        org.joml.Matrix3f nor = poseStack.last().normal();
+
+        // Draw two rect outlines (front slab face, back slab face) and 4 connecting edges.
+        // We work in pose-translated space: cx,cy,cz is origin, corners relative to it.
+        // Relative corner coords:
+        float[] rx = { (float)(rightX * (-hw)), (float)(rightX * hw), (float)(rightX * hw), (float)(rightX * (-hw)) };
+        float[] ry = { -hh, -hh, hh, hh };
+        float[] rz = { (float)(rightZ * (-hw)), (float)(rightZ * hw), (float)(rightZ * hw), (float)(rightZ * (-hw)) };
+
+        for (double fOff : new double[]{ THICK, -THICK }) {
+            float fx = (float)(fwdX * fOff);
+            float fz2 = (float)(fwdZ * fOff);
+            // 4 edges of this rect
+            for (int e = 0; e < 4; e++) {
+                int next = (e + 1) % 4;
+                vc.vertex(mat, rx[e] + fx, ry[e], rz[e] + fz2).color(r, g, b, a).normal(nor, 0f, 1f, 0f).endVertex();
+                vc.vertex(mat, rx[next] + fx, ry[next], rz[next] + fz2).color(r, g, b, a).normal(nor, 0f, 1f, 0f).endVertex();
+            }
+        }
+        // 4 connecting depth edges
+        for (int e = 0; e < 4; e++) {
+            vc.vertex(mat, rx[e] + (float)(fwdX * THICK), ry[e], rz[e] + (float)(fwdZ * THICK)).color(r, g, b, a).normal(nor, 0f, 1f, 0f).endVertex();
+            vc.vertex(mat, rx[e] - (float)(fwdX * THICK), ry[e], rz[e] - (float)(fwdZ * THICK)).color(r, g, b, a).normal(nor, 0f, 1f, 0f).endVertex();
+        }
+
+        bufferSource.endBatch(linesType);
         poseStack.popPose();
     }
 }

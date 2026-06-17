@@ -31,6 +31,8 @@ public class LiveViewState {
     private static final Map<Long, Float> destOffsetUps     = new ConcurrentHashMap<>();
     /** Per-dock destination hole forward offset (shifts eye along fwd axis at destination). */
     private static final Map<Long, Float> destOffsetForwards = new ConcurrentHashMap<>();
+    /** Per-dock wireframe toggle: shows an outline of the dest hole at the destination. */
+    private static final Set<Long> wireframeDocks = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     /** Steps cycled through by sneak+right-click for the face offset. */
     private static final float[] OFFSET_STEPS = { -0.4f, -0.2f, 0.0f, 0.2f, 0.4f };
@@ -102,6 +104,26 @@ public class LiveViewState {
         return next;
     }
 
+    // ── Wireframe API ──────────────────────────────────────────────────────────
+
+    public static boolean isWireframeEnabled(BlockPos dockPos) {
+        return wireframeDocks.contains(dockPos.asLong());
+    }
+
+    /** Toggle wireframe for this dock. Returns new state. */
+    public static boolean toggleWireframe(BlockPos dockPos) {
+        long key = dockPos.asLong();
+        boolean nowOn;
+        if (!wireframeDocks.remove(key)) {
+            wireframeDocks.add(key);
+            nowOn = true;
+        } else {
+            nowOn = false;
+        }
+        save();
+        return nowOn;
+    }
+
     /** Reset all dest offsets to zero. */
     public static void resetDestOffsets(BlockPos dockPos) {
         long key = dockPos.asLong();
@@ -141,6 +163,7 @@ public class LiveViewState {
         destOffsetRights.clear();
         destOffsetUps.clear();
         destOffsetForwards.clear();
+        wireframeDocks.clear();
     }
 
     // ── Persistence ───────────────────────────────────────────────────────────
@@ -151,6 +174,7 @@ public class LiveViewState {
         destOffsetRights.clear();
         destOffsetUps.clear();
         destOffsetForwards.clear();
+        wireframeDocks.clear();
         Path file = getSaveFile();
         if (file == null || !Files.exists(file)) return;
 
@@ -160,7 +184,9 @@ public class LiveViewState {
                 line = line.trim();
                 if (line.isEmpty()) continue;
                 try {
-                    if (line.startsWith("dr:")) {
+                    if (line.startsWith("wf:")) {
+                        wireframeDocks.add(Long.parseLong(line.substring(3)));
+                    } else if (line.startsWith("dr:")) {
                         String[] parts = line.substring(3).split(":", 2);
                         destOffsetRights.put(Long.parseLong(parts[0]), Float.parseFloat(parts[1]));
                     } else if (line.startsWith("du:")) {
@@ -200,6 +226,9 @@ public class LiveViewState {
                 }
                 for (Map.Entry<Long, Float> e : destOffsetForwards.entrySet()) {
                     writer.write("df:" + e.getKey() + ":" + e.getValue()); writer.newLine();
+                }
+                for (long key : wireframeDocks) {
+                    writer.write("wf:" + key); writer.newLine();
                 }
             }
         } catch (IOException ignored) {}

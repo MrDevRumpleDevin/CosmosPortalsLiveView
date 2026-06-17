@@ -24,6 +24,7 @@ import java.util.List;
  *
  * Right-click on portal       → move destination eye FORWARD (+0.5 blocks deeper into dest room)
  * Shift + right-click portal  → move destination eye BACK    (-0.5 blocks, toward portal face)
+ * Ctrl  + right-click portal  → toggle wireframe outline of dest hole at destination
  */
 public class ItemDestForwardBackWand extends Item {
 
@@ -37,6 +38,7 @@ public class ItemDestForwardBackWand extends Item {
     public void appendHoverText(ItemStack stack, @Nullable Level level, List<Component> tooltip, TooltipFlag flag) {
         tooltip.add(Component.literal("Right-click portal → dest FORWARD (+0.5)").withStyle(ChatFormatting.GRAY));
         tooltip.add(Component.literal("Shift+right-click  → dest BACK    (-0.5)").withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.literal("Ctrl+right-click   → toggle wireframe").withStyle(ChatFormatting.GRAY));
     }
 
     @Override
@@ -58,6 +60,25 @@ public class ItemDestForwardBackWand extends Item {
                     true
             );
             return InteractionResult.FAIL;
+        }
+
+        // Detect Ctrl via GLFW key state on the client side
+        boolean ctrl = org.lwjgl.glfw.GLFW.glfwGetKey(
+                net.minecraft.client.Minecraft.getInstance().getWindow().getWindow(),
+                org.lwjgl.glfw.GLFW.GLFW_KEY_LEFT_CONTROL) == org.lwjgl.glfw.GLFW.GLFW_PRESS
+                || org.lwjgl.glfw.GLFW.glfwGetKey(
+                net.minecraft.client.Minecraft.getInstance().getWindow().getWindow(),
+                org.lwjgl.glfw.GLFW.GLFW_KEY_RIGHT_CONTROL) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+
+        if (ctrl) {
+            // Toggle wireframe
+            boolean on = LiveViewState.toggleWireframe(dockPos);
+            player.displayClientMessage(
+                    Component.literal("[LiveView] Wireframe " + (on ? "ON" : "OFF"))
+                             .withStyle(on ? ChatFormatting.GREEN : ChatFormatting.YELLOW),
+                    true
+            );
+            return InteractionResult.SUCCESS;
         }
 
         boolean shift = player.isShiftKeyDown();
