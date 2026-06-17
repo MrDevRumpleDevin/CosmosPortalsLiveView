@@ -220,14 +220,14 @@ public class LocalizedChunkCapture {
         // then shifted by destOffsetForward (wand), parallaxRight/Up (player peek),
         // and destOffsetRight/Up (wand pan — independent of parallax).
         //
-        // D = physical distance from player eye to portal face (i.e. abs(parallaxForward)),
-        // clamped to a minimum of 0.5 so the view never goes degenerate when touching the portal.
-        // This makes the visible window smaller as the player backs away — correct perspective.
+        // Frustum slopes only use parallaxRight for horizontal perspective narrowing.
+        // destOffsetRight/Up pan the eye without changing aperture shape (no tilt artifact).
+        // Vertical slopes exclude parallaxUp — eyeY already incorporates it for peek.
         //
-        // Frustum slopes only use parallaxRight/Up (player lateral offset) for perspective
-        // narrowing. destOffsetRight/Up shift the eye without changing the aperture shape,
-        // producing a pure pan (translation) rather than tilt/rotation.
-        double D = Math.abs(EYE_FORWARD_OFFSET); // fixed 0.5 — texture FOV never changes
+        // D = player distance from portal FACE (center is 0.5 deeper than face, so subtract 0.5).
+        // Clamped to 0.5 minimum so view stays valid when touching the portal.
+        // As player backs away D grows → slopes narrow → visible window shrinks (correct doorway effect).
+        double D = Math.max(0.5, Math.abs(parallaxForward) - 0.5);
 
         double eyeX = eyePos.getX() + 0.5
                 + fwdX * EYE_FORWARD_OFFSET               // fixed 0.5 behind portal plane
@@ -245,8 +245,12 @@ public class LocalizedChunkCapture {
         // changing which portion of the portal window is visible (no tilt/rotation artifact).
         double slopeRight  = ( portalHalfW - parallaxRight) / D;
         double slopeLeft   = (-portalHalfW - parallaxRight) / D;
-        double slopeTop    = ( portalHalfH * 2.0 - parallaxUp) / D;
-        double slopeBottom = (0.0              - parallaxUp) / D;
+        // Vertical slopes: eye Y position (eyeY) already incorporates parallaxUp for peek,
+        // so slopes are fixed relative to portal geometry — no parallaxUp term here.
+        // slopeBottom=0 means horizontal ray at eye level (portal floor from eye POV).
+        // This eliminates the head-bob flicker that occurred when parallaxUp oscillated.
+        double slopeTop    = ( portalHalfH * 2.0) / D;
+        double slopeBottom = 0.0;
 
         // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
         double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
