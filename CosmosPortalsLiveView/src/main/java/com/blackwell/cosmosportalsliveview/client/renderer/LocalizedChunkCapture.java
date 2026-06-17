@@ -201,60 +201,43 @@ public class LocalizedChunkCapture {
         double fwdY =  0.0;
         double fwdZ =  Math.cos(yawRad);
 
-        // Eye at portal destination, pushed back by EYE_FORWARD_OFFSET.
-        // eyeY is anchored to the destination portal floor (portalBottomY) plus the player's
-        // raw eye height above the source portal floor (parallaxUp), clamped to the portal opening.
+        // ── Eye position: fixed at resting eye height behind the portal plane ──
+        // Eye is at the destination portal, pushed back EYE_FORWARD_OFFSET so it
+        // sits inside the dest room without z-clipping the portal face.
+        // Eye Y is always resting height (1.62) above the destination portal floor.
+        // The eye NEVER moves — all parallax is from the off-axis frustum shift below.
+        double eyeDepth = Math.abs(EYE_FORWARD_OFFSET); // 0.5 blocks behind portal plane
         double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET;
-        double rawEyeY = portalBottomY + parallaxUp;
-        double eyeYMin = portalBottomY;
-        double eyeYMax = portalBottomY + portalHalfH * 2.0f;
-        double eyeY = Math.max(eyeYMin, Math.min(eyeYMax, rawEyeY)) + fwdY * EYE_FORWARD_OFFSET;
+        double eyeY = portalBottomY + 1.62;
         double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET;
 
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
-        // rightY = 0 (always horizontal)
 
-        // up is always world-up when pitch=0
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── Doorway / off-axis projection ─────────────────────────────────────
-        // The eye is FIXED behind the portal centre at EYE_FORWARD_OFFSET depth.
-        // The portal opening is the aperture. When the player moves laterally
-        // relative to the portal, the visible "window" into the destination shifts
-        // — you see more of one side, less of the other. This is exactly an
-        // off-axis (asymmetric) frustum: eye stays put, the screen-plane centre moves.
+        // ── Asymmetric frustum: portal opening is the exact aperture ───────────
+        // The eye is at resting height (1.62) above the portal floor, NOT centered
+        // in the portal vertically. So the frustum is asymmetric:
+        //   - Bottom ray passes through the portal floor   → 1.62 below the eye
+        //   - Top ray passes through the portal top        → (portalHalfH*2 - 1.62) above the eye
+        // Both anchored at the portal plane, eyeDepth away.
+        // Horizontally the eye IS centered → symmetric left/right.
         //
-        // Implementation:
-        //   The virtual screen plane sits at distance VIRTUAL_SCREEN_DIST in front
-        //   of the eye. Its half-extents are (portalHalfW, portalHalfH) — so the
-        //   frustum exactly spans the portal opening at that distance (no zoom in/out).
-        //
-        //   parallaxRight: player's lateral offset from portal centre in portal-space.
-        //   Player moves right → they see more of the right side of the destination
-        //   → screen centre shifts LEFT in NDC → we subtract from screenCentreX.
-        //   Clamped to ±portalHalfW so you can't pan past the edge of the portal.
-        //
-        // Eye does NOT translate — no wall clipping.
+        // halfFovW / fovBottom / fovTop are slopes (rise/run), not angles.
+        // They define how the ray direction is computed per pixel.
+        double halfFovW  = portalHalfW / eyeDepth;           // symmetric horizontal
+        double fovBottom = 1.62              / eyeDepth;      // slope to portal floor
+        double fovTop    = (portalHalfH * 2.0 - 1.62) / eyeDepth; // slope to portal top
+
+        // ── Off-axis horizontal shift (panning) ────────────────────────────────
+        // Player moves right of centre → screen shifts right → see more of left wall.
+        // No vertical screen shift — eye Y is fixed, asymmetric frustum handles vertical.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
-
-        float clampedRight = (float) Math.max(-portalHalfW, Math.min(portalHalfW, parallaxRight * scale));
-        float clampedUp    = (float) Math.max(-portalHalfH, Math.min(portalHalfH, parallaxUp    * scale));
-
-        // Shift of the screen centre in world units at the virtual screen plane.
-        // Positive parallaxRight (player right of centre) → player sees more of the left side
-        // → screen centre shifts right → positive shift.
-        // Vertical: direct 1:1, same logic — no damping.
-        double screenShiftRight = +clampedRight;
-        double screenShiftUp    = -clampedUp;
-
-        // Fixed virtual screen distance — determines FOV only, never changes.
-        double virtualScreenDist = VIRTUAL_SCREEN_DIST;
-
-        double halfFovW = portalHalfW / virtualScreenDist;
-        double halfFovH = portalHalfH / virtualScreenDist;
+        double screenShiftRight = Math.max(-20.0, Math.min(20.0, parallaxRight * scale));
+        // screenShiftRight in portal-local world units; convert to NDC shift below per-pixel.
 
         float[] depthBuf = new float[resW * resH];
         int skyAbgr = toABGR(computeSkyColor(0));
@@ -272,14 +255,20 @@ public class LocalizedChunkCapture {
                 break;
             }
             for (int px = 0; px < resW; px++) {
-                // NDC in [-1..1], then offset by screen shift (in portal-half-extent units).
-                // screenShiftRight/Up are in world units at the virtual screen plane.
-                double ndcX =  (2.0 * px + 1.0) / resW - 1.0 + screenShiftRight / portalHalfW;
-                double ndcY = 1.0 - (2.0 * py + 1.0) / resH + screenShiftUp    / portalHalfH;
+                // Horizontal: symmetric NDC [-1..1] shifted by player lateral offset.
+                // screenShiftRight is in world units; divide by portalHalfW to get NDC shift.
+                double ndcX = (2.0 * px + 1.0) / resW - 1.0 + screenShiftRight / portalHalfW;
 
-                double rdX = fwdX + rightX * ndcX * halfFovW + upX * ndcY * halfFovH;
-                double rdY = fwdY +                            upY * ndcY * halfFovH;
-                double rdZ = fwdZ + rightZ * ndcX * halfFovW + upZ * ndcY * halfFovH;
+                // Vertical: asymmetric — py=0 is top of image (portal top), py=resH-1 is bottom (portal floor).
+                // t=0 → top of portal, t=1 → bottom of portal.
+                double t = (py + 0.5) / resH;
+                // Ray slope: positive = up, negative = down.
+                // At t=0 (top): slope = +fovTop. At t=1 (bottom): slope = -fovBottom.
+                double slopeY = fovTop - t * (fovTop + fovBottom);
+
+                double rdX = fwdX + rightX * ndcX * halfFovW;
+                double rdY = fwdY + upY * slopeY;
+                double rdZ = fwdZ + rightZ * ndcX * halfFovW;
 
                 double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
                 if (len < 1e-9) {
@@ -307,7 +296,10 @@ public class LocalizedChunkCapture {
             double projX = dx * rightX              + dz * rightZ;
             double projY = dx * upX + dy * upY + dz * upZ;
             int screenX = (int)((projX / (depth * halfFovW) + 1.0) * 0.5 * resW);
-            int screenY = (int)((1.0 - projY / (depth * halfFovH)) * 0.5 * resH);
+            // Asymmetric vertical: map slope back to pixel row.
+            // slopeY = fovTop - t*(fovTop+fovBottom), so t = (fovTop - slopeY)/(fovTop+fovBottom)
+            double entitySlopeY = projY / depth;
+            int screenY = (int)((fovTop - entitySlopeY) / (fovTop + fovBottom) * resH);
             int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
             for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
                 for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
