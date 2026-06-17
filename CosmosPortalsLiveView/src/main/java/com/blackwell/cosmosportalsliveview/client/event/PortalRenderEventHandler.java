@@ -438,16 +438,16 @@ public class PortalRenderEventHandler {
             if (isXAxis) {
                 // forward = pez (signed): +Z side or -Z side
                 double fwd = pez;
-                // right = pex, but flip sign on back face so "move right" always means
-                // the same direction relative to what you see through the portal.
-                double right = (fwd >= 0) ? pex : -pex;
+                // Negate right so moving right at source shifts the eye LEFT at dest,
+                // producing the correct "peek through hole" parallax (moving right → see left side).
+                double right = (fwd >= 0) ? -pex : pex;
                 data.parallaxOffsetRight   = (float) right;
                 data.parallaxOffsetUp      = (float) pey;
                 data.parallaxOffsetForward = (float) fwd;
             } else {
                 // forward = pex (signed): +X side or -X side
                 double fwd = pex;
-                double right = (fwd >= 0) ? pez : -pez;
+                double right = (fwd >= 0) ? -pez : pez;
                 data.parallaxOffsetRight   = (float) right;
                 data.parallaxOffsetUp      = (float) pey;
                 data.parallaxOffsetForward = (float) fwd;

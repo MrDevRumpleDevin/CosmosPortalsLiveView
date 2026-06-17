@@ -1,6 +1,6 @@
 {
   "parent": "item/handheld",
   "textures": {
-    "layer0": "cosmosportals_liveview:item/live_view_wand"
+    "layer0": "cosmosportals_liveview:item/dest_left_right_wand"
   }
 }

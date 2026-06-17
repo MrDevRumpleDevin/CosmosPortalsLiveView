@@ -4,10 +4,8 @@ import com.blackwell.cosmosportalsliveview.client.LiveViewState;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalLiveViewManager;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalViewData;
 import com.tcn.cosmosportals.core.block.BlockPortal;
-import com.tcn.cosmosportals.core.blockentity.AbstractBlockEntityPortalDock;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -16,15 +14,10 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 
 import javax.annotation.Nullable;
-import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Queue;
-import java.util.Set;
 
 /**
  * Destination Left/Right Wand.
