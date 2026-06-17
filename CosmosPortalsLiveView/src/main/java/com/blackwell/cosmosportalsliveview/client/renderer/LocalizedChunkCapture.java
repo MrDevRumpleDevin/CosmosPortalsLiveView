@@ -121,10 +121,12 @@ public class LocalizedChunkCapture {
         final float    halfHSnap = halfH;
         // Use the smoothed parallax values so the raycaster sees a continuously
         // interpolated offset — eliminates jumps from async timing gaps.
-        final float parallaxRight   = portalData.smoothParallaxRight;
-        final float parallaxUp      = portalData.smoothParallaxUp;
-        final float parallaxForward = portalData.smoothParallaxForward;
-        final float portalBottomY   = portalData.portalBottomY;
+        final float parallaxRight    = portalData.smoothParallaxRight;
+        final float parallaxUp       = portalData.smoothParallaxUp;
+        final float parallaxForward  = portalData.smoothParallaxForward;
+        final float portalBottomY    = portalData.portalBottomY;
+        final float destOffsetRight  = portalData.destOffsetRight;
+        final float destOffsetUp     = portalData.destOffsetUp;
 
         CAPTURE_EXECUTOR.submit(() -> {
             NativeImage image = null;
@@ -135,6 +137,7 @@ public class LocalizedChunkCapture {
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
                                               portalBottomY,
+                                              destOffsetRight, destOffsetUp,
                                               entityDots, deadlineNs);
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
@@ -187,6 +190,7 @@ public class LocalizedChunkCapture {
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp, float parallaxForward,
                                                       float portalBottomY,
+                                                      float destOffsetRight, float destOffsetUp,
                                                       List<EntityDot> entityDots,
                                                       long deadlineNs) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
@@ -202,43 +206,43 @@ public class LocalizedChunkCapture {
         double fwdZ =  Math.cos(yawRad);
 
         // ── Eye position: fixed at resting eye height behind the portal plane ──
-        // Eye is at the destination portal, pushed back EYE_FORWARD_OFFSET so it
-        // sits inside the dest room without z-clipping the portal face.
-        // Eye Y is always resting height (1.62) above the destination portal floor.
-        // The eye NEVER moves — all parallax is from the off-axis frustum shift below.
-        double eyeDepth = Math.abs(EYE_FORWARD_OFFSET); // 0.5 blocks behind portal plane
-        double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET;
-        double eyeY = portalBottomY + 1.62;
-        double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET;
-
+        // Eye is pushed back EYE_FORWARD_OFFSET (0.5 blocks) so it sits just inside
+        // the destination room without z-clipping.
+        // destOffsetRight / destOffsetUp shift the eye laterally/vertically — this moves
+        // the "hole" position at the destination, like Immersive Portals' destination wand.
+        // parallaxRight shifts the view using an off-axis frustum for parallax panning.
+        double eyeDepth = Math.abs(EYE_FORWARD_OFFSET); // always 0.5
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
-
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── Asymmetric frustum driven by player distance ───────────────────────
-        // The portal opening is the aperture. The player's distance from the portal
-        // determines how much of the destination is visible:
-        //   - Far away → shallow angles through portal edges → see less above/below/sides
-        //   - Close up → steep angles → see more
-        //
-        // viewDist = how far the player is standing from the portal face (parallaxForward).
-        // Minimum of eyeDepth so we never divide by zero or invert when player is in the portal.
-        // halfFovW / fovBottom / fovTop are slopes (world units per forward unit), not angles.
-        double viewDist = Math.max(eyeDepth, Math.abs(parallaxForward));
+        double eyeX = eyePos.getX() + 0.5 + fwdX * EYE_FORWARD_OFFSET + rightX * destOffsetRight;
+        double eyeY = portalBottomY + 1.62 + destOffsetUp;
+        double eyeZ = eyePos.getZ() + 0.5 + fwdZ * EYE_FORWARD_OFFSET + rightZ * destOffsetRight;
+
+        // ── Fixed aperture frustum — portal dimensions define the hole ─────────
+        // viewDist is always eyeDepth (0.5). The frustum slopes are derived from the
+        // portal half-extents divided by eyeDepth, so the rendered "hole" is always
+        // exactly the size of the portal quad regardless of player distance.
+        // The eye Y is 1.62 above the portal floor (resting eye height), so:
+        //   fovBottom = how much below eye-level the hole extends (= 1.62 blocks down to floor)
+        //   fovTop    = how much above eye-level the hole extends (= portalHeight - 1.62)
+        // This means the bottom of the image always shows the floor at the destination
+        // and the top shows what's above — a true fixed hole of portal dimensions.
+        double viewDist  = eyeDepth; // ALWAYS 0.5 — never player distance
 
         double halfFovW  = portalHalfW / viewDist;                    // symmetric horizontal
-        double fovBottom = 1.62 / viewDist;                           // slope to portal floor
-        double fovTop    = (portalHalfH * 2.0 - 1.62) / viewDist;    // slope to portal top
+        double fovBottom = 1.62 / viewDist;                           // slope down to portal floor
+        double fovTop    = (portalHalfH * 2.0 - 1.62) / viewDist;    // slope up to portal top
 
-        // ── Off-axis horizontal shift (panning) ────────────────────────────────
-        // Player moves right of centre → screen shifts right → see more of left wall.
-        // No vertical screen shift — player distance + asymmetric frustum handle vertical.
+        // ── Off-axis horizontal panning (parallax) ─────────────────────────────
+        // Player moves right of centre → image shifts right in NDC → see more of left wall.
+        // This is a sub-pixel NDC shift — does NOT change frustum slopes (hole stays fixed).
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
         double screenShiftRight = Math.max(-20.0, Math.min(20.0, parallaxRight * scale));
-        // screenShiftRight in portal-local world units; convert to NDC shift below per-pixel.
+        // screenShiftRight in portal-local world units; converted to NDC shift below per-pixel.
 
         float[] depthBuf = new float[resW * resH];
         int skyAbgr = toABGR(computeSkyColor(0));

@@ -230,12 +230,16 @@ public class PortalRenderEventHandler {
             if (!LiveViewState.isEnabled(dockPos)) continue;
 
             // ── Smooth parallax offsets toward raw values each frame ──────────
-            // This runs on the render thread every frame, so the smoothed values
-            // advance continuously — no jumps even with async raycaster gaps.
             float alpha = PortalViewData.PARALLAX_SMOOTH;
             data.smoothParallaxRight   = data.smoothParallaxRight   + alpha * (data.parallaxOffsetRight   - data.smoothParallaxRight);
             data.smoothParallaxUp      = data.smoothParallaxUp      + alpha * (data.parallaxOffsetUp      - data.smoothParallaxUp);
             data.smoothParallaxForward = data.smoothParallaxForward + alpha * (data.parallaxOffsetForward - data.smoothParallaxForward);
+
+            // ── Sync destination hole offsets from LiveViewState ──────────────
+            // The wand writes to LiveViewState; we mirror it into PortalViewData
+            // so the raycaster sees the latest value without needing extra threading.
+            data.destOffsetRight = LiveViewState.getDestOffsetRight(dockPos);
+            data.destOffsetUp    = LiveViewState.getDestOffsetUp(dockPos);
 
             // ── Per-frame capture trigger ──────────────────────────────────────
             if (capturedThisFrame < portalsPerFrame

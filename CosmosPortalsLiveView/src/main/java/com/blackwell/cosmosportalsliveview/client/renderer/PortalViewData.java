@@ -69,6 +69,15 @@ public class PortalViewData {
     public volatile float smoothParallaxUp      = 0f;
     public volatile float smoothParallaxForward = 2.0f;
 
+    /**
+     * Destination hole offset in portal-local space (blocks).
+     * destOffsetRight: shifts the eye left/right at the destination.
+     * destOffsetUp:    shifts the eye up/down at the destination.
+     * Adjusted via sneak+right-click with the wand, persisted in LiveViewState.
+     */
+    public volatile float destOffsetRight = 0f;
+    public volatile float destOffsetUp    = 0f;
+
     /** Exponential smoothing factor per frame (0=no smoothing, 1=instant). 0.18 ≈ ~5 frame blend. */
     public static final float PARALLAX_SMOOTH = 0.18f;
 
