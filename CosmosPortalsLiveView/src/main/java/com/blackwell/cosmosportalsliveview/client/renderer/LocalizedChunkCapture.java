@@ -240,21 +240,13 @@ public class LocalizedChunkCapture {
         // Eye does NOT translate — no wall clipping.
         float scale = PortalLiveViewConfig.PARALLAX_SCALE.get().floatValue();
 
-        // Off-axis screen shift: wide clamp on horizontal — allow player to pan far left/right
-        // (up to ~180°: player standing at the portal wall can see the wall behind on the other side).
-        // Cap at ±20 blocks as a sanity limit only.
-        float clampedRight = (float) Math.max(-20.0f, Math.min(20.0f, parallaxRight * scale));
-
-        // Vertical screen shift: deviation from resting eye height (PLAYER_EYE_HEIGHT above floor).
-        // At rest, parallaxUp ≈ 1.62, so screenShiftUp = 0 → portal center is at resting eye level.
-        // Crouching or jumping shifts the view up/down naturally.
-        final float REST_EYE_HEIGHT = 1.62f;
-        float verticalDeviation = parallaxUp - REST_EYE_HEIGHT;
-        float clampedUp = (float) Math.max(-portalHalfH * 2.0f, Math.min(portalHalfH * 2.0f, verticalDeviation * scale));
+        float clampedRight = (float) Math.max(-portalHalfW, Math.min(portalHalfW, parallaxRight * scale));
+        float clampedUp    = (float) Math.max(-portalHalfH, Math.min(portalHalfH, parallaxUp    * scale));
 
         // Shift of the screen centre in world units at the virtual screen plane.
-        // Positive parallaxRight (player right of centre) → screen centre shifts right → see more left wall.
-        // Vertical: deviation from rest position, so standing normally = centered view.
+        // Positive parallaxRight (player right of centre) → player sees more of the left side
+        // → screen centre shifts right → positive shift.
+        // Vertical: direct 1:1, same logic — no damping.
         double screenShiftRight = +clampedRight;
         double screenShiftUp    = -clampedUp;
 
