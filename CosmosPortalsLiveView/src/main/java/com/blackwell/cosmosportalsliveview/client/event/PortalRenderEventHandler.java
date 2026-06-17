@@ -238,8 +238,9 @@ public class PortalRenderEventHandler {
             // ── Sync destination hole offsets from LiveViewState ──────────────
             // The wand writes to LiveViewState; we mirror it into PortalViewData
             // so the raycaster sees the latest value without needing extra threading.
-            data.destOffsetRight = LiveViewState.getDestOffsetRight(dockPos);
-            data.destOffsetUp    = LiveViewState.getDestOffsetUp(dockPos);
+            data.destOffsetRight   = LiveViewState.getDestOffsetRight(dockPos);
+            data.destOffsetUp      = LiveViewState.getDestOffsetUp(dockPos);
+            data.destOffsetForward = LiveViewState.getDestOffsetForward(dockPos);
 
             // ── Per-frame capture trigger ──────────────────────────────────────
             if (capturedThisFrame < portalsPerFrame

@@ -1,6 +1,7 @@
 package com.blackwell.cosmosportalsliveview.registry;
 
 import com.blackwell.cosmosportalsliveview.CosmosPortalsLiveView;
+import com.blackwell.cosmosportalsliveview.item.ItemDestForwardBackWand;
 import com.blackwell.cosmosportalsliveview.item.ItemDestLeftRightWand;
 import com.blackwell.cosmosportalsliveview.item.ItemDestUpDownWand;
 import com.blackwell.cosmosportalsliveview.item.ItemLiveViewWand;
@@ -42,6 +43,12 @@ public class ModItems {
             () -> new ItemDestUpDownWand(new Item.Properties().stacksTo(1))
     );
 
+    /** Dedicated wand: right-click = dest FORWARD, shift+right-click = dest BACK. */
+    public static final RegistryObject<Item> DEST_FORWARD_BACK_WAND = ITEMS.register(
+            "dest_forward_back_wand",
+            () -> new ItemDestForwardBackWand(new Item.Properties().stacksTo(1))
+    );
+
     /**
      * Injects all Live View items into the CosmosPortals creative tab.
      * Tab resource key: cosmosportals:cosmos_portals
@@ -56,6 +63,7 @@ public class ModItems {
             event.accept(LIVE_VIEW_WAND.get());
             event.accept(DEST_LEFT_RIGHT_WAND.get());
             event.accept(DEST_UP_DOWN_WAND.get());
+            event.accept(DEST_FORWARD_BACK_WAND.get());
         }
     }
 }

@@ -29,6 +29,8 @@ public class LiveViewState {
     private static final Map<Long, Float> destOffsetRights  = new ConcurrentHashMap<>();
     /** Per-dock destination hole up offset (shifts eye vertically at destination). */
     private static final Map<Long, Float> destOffsetUps     = new ConcurrentHashMap<>();
+    /** Per-dock destination hole forward offset (shifts eye along fwd axis at destination). */
+    private static final Map<Long, Float> destOffsetForwards = new ConcurrentHashMap<>();
 
     /** Steps cycled through by sneak+right-click for the face offset. */
     private static final float[] OFFSET_STEPS = { -0.4f, -0.2f, 0.0f, 0.2f, 0.4f };
@@ -66,6 +68,10 @@ public class LiveViewState {
         return destOffsetUps.getOrDefault(dockPos.asLong(), 0.0f);
     }
 
+    public static float getDestOffsetForward(BlockPos dockPos) {
+        return destOffsetForwards.getOrDefault(dockPos.asLong(), 0.0f);
+    }
+
     /** Nudge the destination hole right by DEST_NUDGE blocks. Returns new value. */
     public static float nudgeDestRight(BlockPos dockPos, float delta) {
         long key = dockPos.asLong();
@@ -86,11 +92,22 @@ public class LiveViewState {
         return next;
     }
 
-    /** Reset both dest offsets to zero. */
+    /** Nudge the destination hole forward by delta blocks. Returns new value. */
+    public static float nudgeDestForward(BlockPos dockPos, float delta) {
+        long key = dockPos.asLong();
+        float next = destOffsetForwards.getOrDefault(key, 0.0f) + delta;
+        next = Math.round(next / DEST_NUDGE) * DEST_NUDGE;
+        destOffsetForwards.put(key, next);
+        save();
+        return next;
+    }
+
+    /** Reset all dest offsets to zero. */
     public static void resetDestOffsets(BlockPos dockPos) {
         long key = dockPos.asLong();
         destOffsetRights.remove(key);
         destOffsetUps.remove(key);
+        destOffsetForwards.remove(key);
         save();
     }
 
@@ -123,6 +140,7 @@ public class LiveViewState {
         dockOffsets.clear();
         destOffsetRights.clear();
         destOffsetUps.clear();
+        destOffsetForwards.clear();
     }
 
     // ── Persistence ───────────────────────────────────────────────────────────
@@ -132,6 +150,7 @@ public class LiveViewState {
         dockOffsets.clear();
         destOffsetRights.clear();
         destOffsetUps.clear();
+        destOffsetForwards.clear();
         Path file = getSaveFile();
         if (file == null || !Files.exists(file)) return;
 
@@ -147,6 +166,9 @@ public class LiveViewState {
                     } else if (line.startsWith("du:")) {
                         String[] parts = line.substring(3).split(":", 2);
                         destOffsetUps.put(Long.parseLong(parts[0]), Float.parseFloat(parts[1]));
+                    } else if (line.startsWith("df:")) {
+                        String[] parts = line.substring(3).split(":", 2);
+                        destOffsetForwards.put(Long.parseLong(parts[0]), Float.parseFloat(parts[1]));
                     } else if (line.contains(":")) {
                         String[] parts = line.split(":", 2);
                         dockOffsets.put(Long.parseLong(parts[0]), Float.parseFloat(parts[1]));
@@ -175,6 +197,9 @@ public class LiveViewState {
                 }
                 for (Map.Entry<Long, Float> e : destOffsetUps.entrySet()) {
                     writer.write("du:" + e.getKey() + ":" + e.getValue()); writer.newLine();
+                }
+                for (Map.Entry<Long, Float> e : destOffsetForwards.entrySet()) {
+                    writer.write("df:" + e.getKey() + ":" + e.getValue()); writer.newLine();
                 }
             }
         } catch (IOException ignored) {}

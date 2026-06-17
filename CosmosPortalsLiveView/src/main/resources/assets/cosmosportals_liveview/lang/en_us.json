@@ -1,5 +1,6 @@
 {
   "item.cosmosportals_liveview.live_view_wand": "Live View Wand",
   "item.cosmosportals_liveview.dest_left_right_wand": "Dest Left/Right Wand",
-  "item.cosmosportals_liveview.dest_up_down_wand": "Dest Up/Down Wand"
+  "item.cosmosportals_liveview.dest_up_down_wand": "Dest Up/Down Wand",
+  "item.cosmosportals_liveview.dest_forward_back_wand": "Dest Forward/Back Wand"
 }

@@ -1,0 +1,6 @@
+{
+  "parent": "item/handheld",
+  "textures": {
+    "layer0": "cosmosportals_liveview:item/dest_forward_back_wand"
+  }
+}
