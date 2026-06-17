@@ -546,7 +546,7 @@ public class PortalRenderEventHandler {
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
 
-        final float EYE_FORWARD_OFFSET = -0.5f;
+        final float EYE_FORWARD_OFFSET = 0.0f;
 
         double cx = data.destPos.getX() + 0.5
                 + fwdX * (EYE_FORWARD_OFFSET + data.destOffsetForward)
