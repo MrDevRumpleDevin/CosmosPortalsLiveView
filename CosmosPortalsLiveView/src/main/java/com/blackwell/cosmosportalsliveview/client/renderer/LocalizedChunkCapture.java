@@ -81,7 +81,7 @@ public class LocalizedChunkCapture {
      * (partial frame rather than a full freeze/stale hold).
      * 80 ms gives a comfortable margin below 100 ms interval at cost of occasional partial renders.
      */
-    private static final long RENDER_BUDGET_NS = 80_000_000L; // 80 ms
+    private static final long RENDER_BUDGET_NS = 200_000_000L; // 200 ms
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -198,6 +198,11 @@ public class LocalizedChunkCapture {
                                                       List<EntityDot> entityDots,
                                                       long deadlineNs) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
+        // Pre-fill with sky so budget-truncated partial renders show sky, not garbage memory.
+        int skyFill = toABGR(computeSkyColor(0));
+        for (int fy = 0; fy < resH; fy++)
+            for (int fx = 0; fx < resW; fx++)
+                image.setPixelRGBA(fx, fy, skyFill);
 
         double yawRad = Math.toRadians(yawDeg);
         // Always render horizontally — ignore stored pitch so the baseline view
