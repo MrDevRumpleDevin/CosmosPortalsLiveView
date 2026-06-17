@@ -136,7 +136,7 @@ public class LocalizedChunkCapture {
                 image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
-                                              parallaxRight, parallaxUp, parallaxForward,
+                                              parallaxRight, parallaxUp,
                                               portalBottomY,
                                               destOffsetRight, destOffsetUp, destOffsetForward,
                                               entityDots, deadlineNs);
@@ -190,7 +190,6 @@ public class LocalizedChunkCapture {
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp,
-                                                      float parallaxForward,
                                                       float portalBottomY,
                                                       float destOffsetRight, float destOffsetUp,
                                                       float destOffsetForward,
@@ -216,22 +215,28 @@ public class LocalizedChunkCapture {
         double upZ = 0.0;
 
         // ── Eye position ───────────────────────────────────────────────────────
-        // Eye is placed EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane,
-        // then shifted by destOffsetForward (wand), parallaxRight/Up (player peek),
-        // and destOffsetRight/Up (wand pan — independent of parallax).
+        // Think of this like a literal hole in a wall:
+        //   - The hole is always the same size (portal dims). It doesn't change.
+        //   - The scene on the other side has fixed geometry. It doesn't zoom.
+        //   - As the player backs away, MC renders the portal quad smaller on screen
+        //     so they naturally see less of the view — that's handled by the quad mesh,
+        //     not by the raycaster.
+        //   - The raycaster always renders the same fixed FOV texture regardless of
+        //     player distance. Only parallax peek (L/R/U) shifts the eye within the hole.
         //
-        // D = physical distance from player eye to portal face (i.e. abs(parallaxForward)),
-        // clamped to a minimum of 0.5 so the view never goes degenerate when touching the portal.
-        // This makes the visible window smaller as the player backs away — correct perspective.
+        // Eye is EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane.
+        // parallaxRight/Up shift the eye laterally (player peeking through the hole).
+        // destOffsetRight/Up/Forward are wand-set absolute eye shifts.
         //
-        // Frustum slopes only use parallaxRight/Up (player lateral offset) for perspective
-        // narrowing. destOffsetRight/Up shift the eye without changing the aperture shape,
-        // producing a pure pan (translation) rather than tilt/rotation.
-        double D = Math.max(Math.abs(EYE_FORWARD_OFFSET), Math.abs(parallaxForward));
+        // D is ALWAYS fixed at abs(EYE_FORWARD_OFFSET) = 0.5.
+        // The aperture slopes are always symmetric around the eye based on portal size only.
+        // Neither player distance nor parallax offsets affect the slopes —
+        // that would change the rendered content (zoom/tilt), not the screen coverage.
+        double D = Math.abs(EYE_FORWARD_OFFSET); // fixed 0.5 always
 
         double eyeX = eyePos.getX() + 0.5
                 + fwdX * EYE_FORWARD_OFFSET               // fixed 0.5 behind portal plane
-                + fwdX * destOffsetForward                 // wand-set forward/back shift
+                + fwdX * destOffsetForward                 // wand forward/back
                 + rightX * (parallaxRight + destOffsetRight);
         double eyeY = portalBottomY + parallaxUp + destOffsetUp;
         double eyeZ = eyePos.getZ() + 0.5
@@ -239,14 +244,16 @@ public class LocalizedChunkCapture {
                 + fwdZ * destOffsetForward
                 + rightZ * (parallaxRight + destOffsetRight);
 
-        // ── Aperture frustum: rays from eye through portal corner edges ────────
-        // Slopes to portal edges are computed relative to the eye's parallax-shifted position.
-        // destOffsetRight/Up are intentionally excluded here — they pan the eye without
-        // changing which portion of the portal window is visible (no tilt/rotation artifact).
-        double slopeRight  = ( portalHalfW - parallaxRight) / D;
-        double slopeLeft   = (-portalHalfW - parallaxRight) / D;
-        double slopeTop    = ( portalHalfH * 2.0 - parallaxUp) / D;
-        double slopeBottom = (0.0              - parallaxUp) / D;
+        // ── Aperture frustum ──────────────────────────────────────────────────
+        // Always covers the full portal opening from the eye's shifted position.
+        // Slopes are symmetric — left edge = -halfW/D from eye center, etc.
+        // No parallax offsets in the slopes: parallax shifts the eye, not the FOV cone.
+        // This means the texture always shows the same angular extent of the destination —
+        // a fixed window into the other side, just viewed from a shifted eye position.
+        double slopeRight  =  portalHalfW       / D;
+        double slopeLeft   = -portalHalfW       / D;
+        double slopeTop    =  portalHalfH * 2.0 / D;
+        double slopeBottom =  0.0               / D; // = 0, eye is at floor level by default
 
         // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
         double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
@@ -258,11 +265,13 @@ public class LocalizedChunkCapture {
         for (int py = 0; py < resH; py++) {
             // Budget check once per scanline — avoids nanoTime() overhead per pixel.
             if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) {
-                // Fill remaining rows with sky and bail — gives a partial but uploadable frame.
+                // Budget exceeded: fill remaining rows by stretching the last completed row.
+                // This avoids the sky-blue artifact from painting unfinished rows with sky color.
+                int srcRow = py - 1;
                 for (int fy = py; fy < resH; fy++) {
                     for (int fx = 0; fx < resW; fx++) {
-                        image.setPixelRGBA(fx, fy, skyAbgr);
-                        depthBuf[fy * resW + fx] = MAX_RAY_DIST;
+                        image.setPixelRGBA(fx, fy, image.getPixelRGBA(fx, srcRow));
+                        depthBuf[fy * resW + fx] = depthBuf[srcRow * resW + fx];
                     }
                 }
                 break;
