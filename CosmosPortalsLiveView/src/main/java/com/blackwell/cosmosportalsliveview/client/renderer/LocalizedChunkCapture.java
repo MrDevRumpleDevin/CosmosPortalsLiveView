@@ -48,6 +48,7 @@ public class LocalizedChunkCapture {
 
     private static final float  VIRTUAL_SCREEN_DIST = 2.0f;
     private static final float  EYE_FORWARD_OFFSET  = -0.5f;
+    private static final float  PLAYER_EYE_HEIGHT   = 1.62f;
     private static final int    MAX_RAY_DIST        = 48;
     private static final double ENTITY_SCAN_RADIUS  = 32.0;
 
@@ -215,56 +216,52 @@ public class LocalizedChunkCapture {
         double upY = 1.0;
         double upZ = 0.0;
 
-        // ── Eye position ───────────────────────────────────────────────────────
-        // Eye is placed EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane,
-        // then shifted by destOffsetForward (wand), parallaxRight/Up (player peek),
-        // and destOffsetRight/Up (wand pan — independent of parallax).
+        // ── Eye position — FIXED at destination, independent of player position ──
         //
-        // Frustum slopes only use parallaxRight for horizontal perspective narrowing.
-        // destOffsetRight/Up pan the eye without changing aperture shape (no tilt artifact).
-        // Vertical slopes exclude parallaxUp — eyeY already incorporates it for peek.
+        // The portal quad is a static window into the destination world.
+        // The scene on the other side must NOT translate when the player moves —
+        // only the visible slice through the portal hole changes.
         //
-        // D = player distance from portal FACE (center is 0.5 deeper than face, so subtract 0.5).
-        // Clamped to 0.5 minimum so view stays valid when touching the portal.
-        // As player backs away D grows → slopes narrow → visible window shrinks (correct doorway effect).
+        // Eye is placed EYE_FORWARD_OFFSET (= -0.5) behind the dest portal plane.
+        // Wand destOffsets shift the eye for manual framing only.
+        // parallaxRight/Up do NOT move the eye — they only affect frustum slopes below.
+        //
+        // eyeY is fixed at a standing eye height above the dest portal floor.
+        // This anchors the scene vertically — no bob, no drift.
+        double eyeX = eyePos.getX() + 0.5
+                + fwdX * (EYE_FORWARD_OFFSET + destOffsetForward)
+                + rightX * destOffsetRight;
+        double eyeY = portalBottomY + PLAYER_EYE_HEIGHT + destOffsetUp;
+        double eyeZ = eyePos.getZ() + 0.5
+                + fwdZ * (EYE_FORWARD_OFFSET + destOffsetForward)
+                + rightZ * destOffsetRight;
+
+        // ── D: player distance from the portal FACE ────────────────────────────
+        // parallaxForward is measured to portal CENTER; face is 0.5 blocks closer.
+        // Min 0.5 so slopes stay valid when player is touching the portal surface.
         double D = Math.max(0.5, Math.abs(parallaxForward) - 0.5);
 
-        double eyeX = eyePos.getX() + 0.5
-                + fwdX * EYE_FORWARD_OFFSET               // fixed 0.5 behind portal plane
-                + fwdX * destOffsetForward                 // wand-set forward/back shift
-                + rightX * (parallaxRight + destOffsetRight);
-        double eyeY = portalBottomY + parallaxUp + destOffsetUp;
-        double eyeZ = eyePos.getZ() + 0.5
-                + fwdZ * EYE_FORWARD_OFFSET
-                + fwdZ * destOffsetForward
-                + rightZ * (parallaxRight + destOffsetRight);
-
-        // ── Aperture frustum: true "window" model ─────────────────────────────
-        // Each pixel on the portal quad maps to a physical point on the portal face.
-        // The ray from the player's eye through that point defines what that pixel shows.
+        // ── Frustum slopes: true window/doorway model ─────────────────────────
         //
-        // For column px at ndcX: quadRight = lerp(-halfW, +halfW, ndcX)
-        //   slopeH = (quadRight - parallaxRight) / D
-        // Corner slopes follow naturally:
-        //   slopeRight  = (+halfW - parallaxRight) / D   [ndcX=1, rightmost column]
-        //   slopeLeft   = (-halfW - parallaxRight) / D   [ndcX=0, leftmost column]
+        // Each pixel on the portal quad corresponds to a physical point on the
+        // portal face.  The ray from the player's eye through that point tells us
+        // what angle to cast into the destination.
         //
-        // For row py at ndcY=0 (top of image = top of portal):
-        //   quadUp = 2*halfH  →  slopeTop = (2*halfH - parallaxUp) / D
-        // For ndcY=1 (bottom of image = portal floor):
-        //   quadUp = 0        →  slopeBottom = (0 - parallaxUp) / D
+        // Corner slope = (quad edge position − player lateral offset) / D
+        //   horizontal: quad edge at ±halfW, player is parallaxRight off-centre
+        //   vertical:   quad top at +halfH*2 above floor, bottom at 0 (floor level)
+        //               player eye is at a fixed PLAYER_EYE_HEIGHT above portal floor
         //
-        // parallaxRight = lateral eye offset from portal center (portal-local right axis)
-        // parallaxUp    = eye height above portal bottom floor (stripped of head-bob — stable)
-        // D             = eye distance from portal FACE (parallaxForward is to center, -0.5 to face)
+        // Using PLAYER_EYE_HEIGHT (constant 1.62) rather than actual camera Y
+        // eliminates head-bob oscillation that caused the bottom rows to flicker.
         //
-        // This produces the correct doorway effect: backing up increases D → slopes compress
-        // → visible window shrinks, exactly like looking through a real hole in a wall.
-        // destOffsetRight/Up pan the eye position only (not slopes) so wand offsets don't tilt.
+        // As D grows (player backs away) slopes compress → visible window narrows,
+        // exactly like looking through a real hole in a wall.
+        double eyeAboveFloor = PLAYER_EYE_HEIGHT; // constant — no bob, no drift
         double slopeRight  = ( portalHalfW - parallaxRight) / D;
         double slopeLeft   = (-portalHalfW - parallaxRight) / D;
-        double slopeTop    = (portalHalfH * 2.0 - parallaxUp) / D;
-        double slopeBottom = (                  - parallaxUp) / D;
+        double slopeTop    = (portalHalfH * 2.0 - eyeAboveFloor) / D;
+        double slopeBottom = (              0.0 - eyeAboveFloor) / D;
 
         // Pre-compute per-pixel slope ranges for fast lerp in the inner loop
         double slopeDeltaH = slopeRight - slopeLeft;   // horizontal slope span
