@@ -47,7 +47,7 @@ import java.util.concurrent.Executors;
 public class LocalizedChunkCapture {
 
     private static final float  VIRTUAL_SCREEN_DIST = 2.0f;
-    private static final float  EYE_FORWARD_OFFSET  = 0.0f;
+    private static final float  EYE_FORWARD_OFFSET  = -1.0f;
     private static final float  PLAYER_EYE_HEIGHT   = 1.62f;
     private static final int    MAX_RAY_DIST        = 48;
     private static final double ENTITY_SCAN_RADIUS  = 32.0;
