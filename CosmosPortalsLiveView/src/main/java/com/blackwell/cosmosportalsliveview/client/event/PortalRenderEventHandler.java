@@ -625,12 +625,15 @@ public class PortalRenderEventHandler {
                                              PortalViewData data,
                                              Camera camera,
                                              Level level) {
-        // Reconstruct dest eye centre (same math as LocalizedChunkCapture)
-        double yawRad = Math.toRadians(data.destYaw);
-        double fwdX = -Math.sin(yawRad);
-        double fwdZ =  Math.cos(yawRad);
-        double rightX =  Math.cos(yawRad);
-        double rightZ =  Math.sin(yawRad);
+        // Reconstruct dest eye centre using portal axis geometry (same as raycaster).
+        // Forward is opposite to parallaxForward sign (player on +Z side looks in -Z).
+        double fwdSign = (data.smoothParallaxForward >= 0.0) ? -1.0 : 1.0;
+        double fwdX, fwdZ, rightX, rightZ;
+        if (data.portalAxisIsX) {
+            fwdX = 0.0; fwdZ = fwdSign; rightX = 1.0; rightZ = 0.0;
+        } else {
+            fwdX = fwdSign; fwdZ = 0.0; rightX = 0.0; rightZ = 1.0;
+        }
 
         final float EYE_FORWARD_OFFSET = 0.0f;
 

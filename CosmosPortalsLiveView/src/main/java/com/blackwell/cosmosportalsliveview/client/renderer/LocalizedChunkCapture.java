@@ -235,18 +235,21 @@ public class LocalizedChunkCapture {
         //   parallaxForward > 0 → player is on the +normal side, rays fire in +normal dir
         //   parallaxForward < 0 → player is on the -normal side, rays fire in -normal dir
         //   (= 0: player is dead-center on the portal face; keep last direction — use signum or default +1)
-        double fwdSign = (parallaxForward >= 0.0f) ? 1.0 : -1.0;
+        // The player on the +Z side of an axis=X portal is LOOKING toward -Z.
+        // Rays at the destination must fire in -Z (into the room), not +Z (away from it).
+        // So forward sign is OPPOSITE to parallaxForward sign.
+        double fwdSign = (parallaxForward >= 0.0f) ? -1.0 : 1.0;
 
         double fwdX, fwdZ, rightX, rightZ;
         if (axisIsX) {
             // Portal spans X-axis, face normal is Z
             fwdX   = 0.0;
-            fwdZ   = fwdSign;   // +Z or -Z depending on which face player is on
+            fwdZ   = fwdSign;   // −Z when player on +Z side (looking into room), +Z when on -Z side
             rightX = 1.0;
             rightZ = 0.0;
         } else {
             // Portal spans Z-axis, face normal is X
-            fwdX   = fwdSign;   // +X or -X
+            fwdX   = fwdSign;   // −X when player on +X side (looking into room), +X when on -X side
             fwdZ   = 0.0;
             rightX = 0.0;
             rightZ = 1.0;
