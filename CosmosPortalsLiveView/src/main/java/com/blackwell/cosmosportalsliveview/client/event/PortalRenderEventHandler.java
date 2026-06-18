@@ -5,6 +5,7 @@ import com.blackwell.cosmosportalsliveview.config.PortalLiveViewConfig;
 import com.blackwell.cosmosportalsliveview.client.renderer.LocalizedChunkCapture;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalLiveViewManager;
 import com.blackwell.cosmosportalsliveview.client.renderer.PortalViewData;
+import com.blackwell.cosmosportalsliveview.client.renderer.StencilPortalRenderer;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
@@ -252,26 +253,39 @@ public class PortalRenderEventHandler {
                 }
             }
 
-            // ── Per-frame capture trigger ──────────────────────────────────────
-            // Gate only on: portalsPerFrame slot available + no render already running.
-            // Time-based interval is NOT used — the in-flight boolean IS the throttle.
-            // As soon as a raycaster job completes, the next fires immediately, giving
-            // as-fast-as-possible update rate without ever doubling up work.
-            if (capturedThisFrame < portalsPerFrame && !data.isCaptureInFlight()) {
-                LocalizedChunkCapture.captureAsync(data, level);
-                capturedThisFrame++;
+            // ── Determine if this is a same-dimension portal ────────────────────
+            boolean sameDimension = level.dimension().location().equals(data.destDimension);
+
+            // ── Stencil path: same-dimension, real Minecraft rendering ───────────
+            // Attempt stencil render first. Falls back to raycaster if:
+            //   - stencil buffer not available (shader mods that replaced framebuffer)
+            //   - destination hole center not yet scanned
+            //   - any other condition StencilPortalRenderer rejects
+            boolean stencilRendered = false;
+            if (sameDimension) {
+                stencilRendered = StencilPortalRenderer.renderPortal(
+                        data, poseStack, camera, event.getPartialTick());
             }
 
-            DynamicTexture texture = data.getTexture();
-            if (texture == null) continue;
+            // ── Raycaster path: cross-dimension, or stencil fallback ─────────────
+            if (!stencilRendered) {
+                // Gate only on: portalsPerFrame slot available + no render already running.
+                if (capturedThisFrame < portalsPerFrame && !data.isCaptureInFlight()) {
+                    LocalizedChunkCapture.captureAsync(data, level);
+                    capturedThisFrame++;
+                }
 
-            // Include version in key so resolution changes force a new GL texture object.
-            ResourceLocation texLoc = minecraft.getTextureManager().register(
-                    "cosmosportals_liveview/portal_" + data.portalPos.asLong() + "_v" + data.getTextureVersion(),
-                    texture
-            );
+                DynamicTexture texture = data.getTexture();
+                if (texture == null) continue;
 
-            renderPortalFrame(poseStack, bufferSource, data, texLoc, camera, level, dockPos);
+                // Include version in key so resolution changes force a new GL texture object.
+                ResourceLocation texLoc = minecraft.getTextureManager().register(
+                        "cosmosportals_liveview/portal_" + data.portalPos.asLong() + "_v" + data.getTextureVersion(),
+                        texture
+                );
+
+                renderPortalFrame(poseStack, bufferSource, data, texLoc, camera, level, dockPos);
+            }
 
             // ── Wireframe: draw dest hole outline at destination coords ────────
             if (LiveViewState.isWireframeEnabled(dockPos) && data.destPos != null) {
@@ -716,3 +730,4 @@ public class PortalRenderEventHandler {
         poseStack.popPose();
     }
 }
+
