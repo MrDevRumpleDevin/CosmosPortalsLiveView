@@ -213,8 +213,6 @@ public class PortalRenderEventHandler {
         Camera camera = event.getCamera();
         Vec3 camPos = camera.getPosition();
 
-        long currentTime = System.currentTimeMillis();
-        long captureInterval = PortalLiveViewConfig.CAPTURE_INTERVAL_MS.get();
         int portalsPerFrame = PortalLiveViewConfig.PORTALS_PER_FRAME.get();
         int capturedThisFrame = 0;
 
@@ -255,8 +253,11 @@ public class PortalRenderEventHandler {
             }
 
             // ── Per-frame capture trigger ──────────────────────────────────────
-            if (capturedThisFrame < portalsPerFrame
-                    && data.shouldUpdateCapture(currentTime, captureInterval)) {
+            // Gate only on: portalsPerFrame slot available + no render already running.
+            // Time-based interval is NOT used — the in-flight boolean IS the throttle.
+            // As soon as a raycaster job completes, the next fires immediately, giving
+            // as-fast-as-possible update rate without ever doubling up work.
+            if (capturedThisFrame < portalsPerFrame && !data.isCaptureInFlight()) {
                 LocalizedChunkCapture.captureAsync(data, level);
                 capturedThisFrame++;
             }

@@ -498,8 +498,14 @@ public class LocalizedChunkCapture {
         double loy = oy - bp.getY();
         double loz = oz - bp.getZ();
 
-        double tMin = Math.max(0.0, tEntry - 0.01);
-        double tMax = tEntry + 1.8;
+        // tEntry is the DDA world-ray t at which this block was reached.
+        // Quad intersection operates in block-LOCAL space (origin at bp corner),
+        // so t=0 is right at the ray's block-local origin — completely independent
+        // of tEntry.  Using tEntry here was wrong (different t-space) and caused
+        // flush-face blocks to be culled.  Use a small epsilon only to skip self
+        // (the aperture plane itself) and a generous tMax to catch any geometry.
+        double tMin = 0.001;
+        double tMax = 2.5;
 
         double bestT   = Double.MAX_VALUE;
         double bestNX  = 0, bestNY = 1, bestNZ = 0;
@@ -592,8 +598,14 @@ public class LocalizedChunkCapture {
         if (shape == null || shape.isEmpty()) return null;
 
         double lox = ox - bp.getX(), loy = oy - bp.getY(), loz = oz - bp.getZ();
-        double tMin = Math.max(0.0, tEntry - 0.01);
-        double tMax = tEntry + 1.8;
+        // tEntry is the DDA world-ray t at which this block was reached.
+        // Quad intersection operates in block-LOCAL space (origin at bp corner),
+        // so t=0 is right at the ray's block-local origin — completely independent
+        // of tEntry.  Using tEntry here was wrong (different t-space) and caused
+        // flush-face blocks to be culled.  Use a small epsilon only to skip self
+        // (the aperture plane itself) and a generous tMax to catch any geometry.
+        double tMin = 0.001;
+        double tMax = 2.5;
 
         double bestT = Double.MAX_VALUE;
         double bestNX = 0, bestNY = 1, bestNZ = 0;
