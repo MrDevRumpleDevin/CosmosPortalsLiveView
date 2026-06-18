@@ -223,98 +223,101 @@ public class LocalizedChunkCapture {
                 image.setPixelRGBA(fx, fy, skyFill);
 
         double yawRad = Math.toRadians(yawDeg);
-        // Always render horizontally — ignore stored pitch so the baseline view
-        // is always eye-level through the portal, not tilted up/down from when
-        // the portal was linked.
-        // pitchDeg is kept as a parameter for API compatibility but not used here.
 
+        // ── Destination basis vectors (looking INTO the destination room) ─────────
+        // fwd points away from the portal face into the room — where rays travel.
+        // right = cross(fwd, up).  Up is always world +Y (no tilt).
         double fwdX = -Math.sin(yawRad);
         double fwdY =  0.0;
         double fwdZ =  Math.cos(yawRad);
-
-        // ── Basis vectors ──────────────────────────────────────────────────────────
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
-        double upX = 0.0;
-        double upY = 1.0;
-        double upZ = 0.0;
 
-        // ── Orthographic projection — the portal IS the camera sensor ────────
-        //
-        // Every pixel fires a ray in the SAME direction (fwd). There is no
-        // perspective, no FOV, no fisheye. The portal quad maps 1:1 to a same-sized
-        // window at the destination — like cutting a hole in space.
-        //
-        // Pixel origin = destBase + right*pixelX + up*pixelY + parallaxRight shift.
-        // parallaxRight shifts ALL ray origins laterally together, so standing to the
-        // right of the portal reveals the left side of the destination (peek effect).
-        // Player distance (parallaxForward) does NOT change the image at all —
-        // backing away just makes the quad smaller on screen, not different content.
-        //
-        // destBase: bottom-left corner of the destination window in world space.
-        //   X/Z: dest block center + fwdOffset (EYE_FORWARD_OFFSET behind face)
-        //        + parallaxRight shifts the whole window laterally
-        //   Y:   portalBottomY — bottom of portal, so bottom pixel = floor always.
-        double baseX = destHoleCenterX
-                + fwdX * (EYE_FORWARD_OFFSET + destOffsetForward)
-                + rightX * (destOffsetRight + parallaxRight);
-        double baseY = destHoleBottomY + destOffsetUp;
-        double baseZ = destHoleCenterZ
-                + fwdZ * (EYE_FORWARD_OFFSET + destOffsetForward)
-                + rightZ * (destOffsetRight + parallaxRight);
-
-        // Portal dimensions in world units
+        // ── Portal aperture plane (at destination) ────────────────────────────────
+        // The portal opening is the "window glass".  Its centre is destHoleCenter.
+        // portalHalfW / portalHalfH define the size of the opening.
         double portalWidth  = portalHalfW * 2.0;
         double portalHeight = portalHalfH * 2.0;
 
-        // Per-pixel world-space step sizes (orthographic: pixel maps to world unit)
-        // ndcX=0 → left edge (-halfW from center), ndcX=1 → right edge (+halfW)
-        // ndcY=0 → top of image (portal top), ndcY=1 → bottom (portal floor)
-        // We offset baseX/Z to the LEFT edge of the portal here so the loop just
-        // adds pixelX * stepRight each column.
-        double leftEdgeX = baseX - rightX * portalHalfW;
-        double leftEdgeZ = baseZ - rightZ * portalHalfW;
+        // Centre of the aperture plane (world-space).
+        // destOffsetRight/Up let the wand shift the viewed region; they move the
+        // aperture centre, not the eye, so the window crops a different area.
+        double apertureX = destHoleCenterX + rightX * destOffsetRight;
+        double apertureY = destHoleBottomY + portalHalfH + destOffsetUp; // vertical center
+        double apertureZ = destHoleCenterZ + rightZ * destOffsetRight;
+
+        // ── Eye position ─────────────────────────────────────────────────────────
+        // Eye sits EYE_FORWARD_OFFSET blocks behind the aperture INTO the room
+        // (EYE_FORWARD_OFFSET = -1 → 1 block behind the portal face).
+        // parallaxRight/Up translate the eye laterally with the player so the
+        // player "peeks" around the edge — near objects shift more than far ones,
+        // giving the scene real 3D depth.
+        // parallaxUp is the player eye height above the portal floor — the eye at
+        // the destination rises/falls to match, keeping floors and ceilings aligned.
+        double eyeForward = EYE_FORWARD_OFFSET + destOffsetForward; // negative = behind face
+        double eyeX = apertureX + fwdX * eyeForward + rightX * parallaxRight;
+        double eyeY = destHoleBottomY + parallaxUp;          // eye height from dest floor
+        double eyeZ = apertureZ + fwdZ * eyeForward + rightZ * parallaxRight;
+
+        // ── Bottom-left corner of the aperture plane ─────────────────────────────
+        double leftEdgeX = apertureX - rightX * portalHalfW;
+        double leftEdgeY = destHoleBottomY;                   // bottom of portal
+        double leftEdgeZ = apertureZ - rightZ * portalHalfW;
 
         float[] depthBuf = new float[resW * resH];
 
         for (int py = 0; py < resH; py++) {
             if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) break;
 
-            // ndcY=0 → top of portal, ndcY=1 → bottom (floor)
-            // Flip: py=0 is top of image, maps to portal TOP (highest Y)
+            // py=0 → top of portal, py=resH-1 → floor
             double ndcY = (py + 0.5) / resH;
-            // worldY: py=0 → portalBottomY + portalHeight (top), py=resH-1 → portalBottomY (floor)
-            double worldY = baseY + portalHeight * (1.0 - ndcY);
+            double pixelY = leftEdgeY + portalHeight * (1.0 - ndcY);
 
             for (int px = 0; px < resW; px++) {
-                // ndcX=0 → left edge, ndcX=1 → right edge
                 double ndcX = (px + 0.5) / resW;
-                // worldX/Z: slide along the right axis across the portal width
-                double originX = leftEdgeX + rightX * (portalWidth * ndcX);
-                double originZ = leftEdgeZ + rightZ * (portalWidth * ndcX);
+                // World position of this pixel on the aperture plane
+                double pixelX = leftEdgeX + rightX * (portalWidth * ndcX);
+                double pixelZ = leftEdgeZ + rightZ * (portalWidth * ndcX);
 
-                // All rays fire in exactly the same direction — pure orthographic
+                // ── Perspective: ray from eye through aperture pixel ──────────
+                double rdX = pixelX - eyeX;
+                double rdY = pixelY - eyeY;
+                double rdZ = pixelZ - eyeZ;
+                double len = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
+                if (len < 1e-9) { image.setPixelRGBA(px, py, toABGR(computeSkyColor(0))); continue; }
+                rdX /= len; rdY /= len; rdZ /= len;
+
+                // Ray starts just past the aperture plane (avoid self-intersection
+                // with portal face blocks); origin = aperture pixel + tiny push forward
+                double startX = pixelX + fwdX * 0.05;
+                double startY = pixelY + rdY  * 0.05;
+                double startZ = pixelZ + fwdZ * 0.05;
+
                 int[] hitColor = new int[1];
-                float dist = ddaRay(level, originX, worldY, originZ, fwdX, fwdY, fwdZ, hitColor);
+                float dist = ddaRay(level, startX, startY, startZ, rdX, rdY, rdZ, hitColor);
 
                 image.setPixelRGBA(px, py, toABGR(hitColor[0]));
                 depthBuf[py * resW + px] = dist;
             }
         }
 
-        // Entity dots — orthographic projection
+        // Entity dots — perspective projection from eye
         for (EntityDot dot : entityDots) {
-            // Project entity world position onto the portal plane
-            double ex = dot.x() - leftEdgeX;
-            double ey = dot.y() - baseY;
-            double ez = dot.z() - leftEdgeZ;
-            double depth = ex * fwdX + ey * fwdY + ez * fwdZ;
+            double dx = dot.x() - eyeX;
+            double dy = dot.y() - eyeY;
+            double dz = dot.z() - eyeZ;
+            // Depth along fwd axis
+            double depth = dx * fwdX + dy * 0.0 + dz * fwdZ;
             if (depth < 0.1) continue;
-            // Orthographic: project onto right/up axes directly (no divide by depth)
-            double projX = ex * rightX + ez * rightZ;
-            double projY = ey; // up is world Y
-            int screenX = (int)(projX / portalWidth  * resW);
-            int screenY = (int)((1.0 - projY / portalHeight) * resH);
+            // Project onto aperture plane (perspective divide)
+            double projRight = (dx * rightX + dz * rightZ) / depth;
+            double projUp    = dy / depth;
+            // Convert to aperture-plane offset from centre, then to pixel coords
+            double apertureEyeDist = Math.abs(eyeForward);
+            double screenRight = projRight * apertureEyeDist;
+            double screenUp    = projUp    * apertureEyeDist;
+            int screenX = (int)((screenRight / portalWidth  + 0.5) * resW);
+            int screenY = (int)(0.5 * resH - (screenUp / portalHeight) * resH);
             int dotSize = Math.max(1, (int)(4.0 - depth / 10.0));
             for (int dy2 = -dotSize; dy2 <= dotSize; dy2++) {
                 for (int dx2 = -dotSize; dx2 <= dotSize; dx2++) {
