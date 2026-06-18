@@ -126,11 +126,10 @@ public class LocalizedChunkCapture {
         final Level    levelSnap = sampleLevel;
         final int      resWSnap  = resW;
         final int      resHSnap  = resH;
-        // CosmosPortals stores yaw/pitch with labels swapped (Vec2.x=pitch stored as "pos_yaw",
-        // Vec2.y=yaw stored as "pos_pitch"). So destInfo.getYaw() is actually the player's pitch
-        // and destInfo.getPitch() is actually the player's yaw. Use destPitch as the ray yaw.
-        final float    yaw       = portalData.destPitch;   // real horizontal yaw
-        final float    pitch     = portalData.destYaw;     // real vertical pitch (unused)
+        // Ray direction is derived from the portal's physical axis — not from stored
+        // destYaw/destPitch (those are unreliable: CosmosPortals swaps the labels AND they
+        // represent arrival orientation, not portal face normal).
+        final boolean  axisIsX   = portalData.portalAxisIsX;
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
         // Use the smoothed parallax values so the raycaster sees a continuously
@@ -154,7 +153,7 @@ public class LocalizedChunkCapture {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
-                image = renderPerspectiveView(levelSnap, yaw, pitch,
+                image = renderPerspectiveView(levelSnap, axisIsX,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
@@ -207,7 +206,7 @@ public class LocalizedChunkCapture {
     // ── Renderer ───────────────────────────────────────────────────────────────
 
     private static NativeImage renderPerspectiveView(Level level,
-                                                      float yawDeg, float pitchDeg,
+                                                      boolean axisIsX,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp,
@@ -225,19 +224,34 @@ public class LocalizedChunkCapture {
             for (int fx = 0; fx < resW; fx++)
                 image.setPixelRGBA(fx, fy, skyFill);
 
-        double yawRad = Math.toRadians(yawDeg);
-        // Always render horizontally — ignore stored pitch so the baseline view
-        // is always eye-level through the portal, not tilted up/down from when
-        // the portal was linked.
-        // pitchDeg is kept as a parameter for API compatibility but not used here.
+        // ── Forward / right basis from portal axis geometry ────────────────────────
+        //
+        //   axisIsX = true  → portal face spans X, face normal is ±Z
+        //     forward = ±Z,  right = +X
+        //   axisIsX = false → portal face spans Z, face normal is ±X
+        //     forward = ±X,  right = +Z
+        //
+        // parallaxForward sign picks which of the two opposite normals to use:
+        //   parallaxForward > 0 → player is on the +normal side, rays fire in +normal dir
+        //   parallaxForward < 0 → player is on the -normal side, rays fire in -normal dir
+        //   (= 0: player is dead-center on the portal face; keep last direction — use signum or default +1)
+        double fwdSign = (parallaxForward >= 0.0f) ? 1.0 : -1.0;
 
-        double fwdX = -Math.sin(yawRad);
-        double fwdY =  0.0;
-        double fwdZ =  Math.cos(yawRad);
-
-        // ── Basis vectors ──────────────────────────────────────────────────────────
-        double rightX =  Math.cos(yawRad);
-        double rightZ =  Math.sin(yawRad);
+        double fwdX, fwdZ, rightX, rightZ;
+        if (axisIsX) {
+            // Portal spans X-axis, face normal is Z
+            fwdX   = 0.0;
+            fwdZ   = fwdSign;   // +Z or -Z depending on which face player is on
+            rightX = 1.0;
+            rightZ = 0.0;
+        } else {
+            // Portal spans Z-axis, face normal is X
+            fwdX   = fwdSign;   // +X or -X
+            fwdZ   = 0.0;
+            rightX = 0.0;
+            rightZ = 1.0;
+        }
+        double fwdY = 0.0;
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;

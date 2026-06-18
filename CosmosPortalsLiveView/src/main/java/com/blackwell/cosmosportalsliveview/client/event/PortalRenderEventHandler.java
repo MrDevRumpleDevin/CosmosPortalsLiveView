@@ -498,6 +498,7 @@ public class PortalRenderEventHandler {
             data.portalHalfW = hw;
             data.portalHalfH = halfH;
             data.portalBottomY = (float) minY; // world Y of lowest portal block floor
+            data.portalAxisIsX = isXAxis;
         }
 
         // Base offset: -0.52 pushes the quad inward (toward the player's side of the portal,

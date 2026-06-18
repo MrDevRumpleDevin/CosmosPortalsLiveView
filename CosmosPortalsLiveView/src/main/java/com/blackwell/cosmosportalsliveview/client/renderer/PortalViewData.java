@@ -39,6 +39,8 @@ public class PortalViewData {
      */
     public volatile float portalHalfW = 1.0f;
     public volatile float portalHalfH = 1.0f;
+    /** True = portal spans X axis, face normal is ±Z. False = spans Z, face normal ±X. */
+    public volatile boolean portalAxisIsX = true;
 
     /**
      * World Y of the lowest portal block's floor (integer — the minY block's bottom face).
