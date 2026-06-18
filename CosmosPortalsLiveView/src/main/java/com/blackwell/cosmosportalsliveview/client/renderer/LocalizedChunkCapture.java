@@ -151,13 +151,23 @@ public class LocalizedChunkCapture {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
+                boolean[] completed = { false };
                 image = renderPerspectiveView(levelSnap, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
                                               destHoleCenterX, destHoleCenterZ, destHoleBottomY,
                                               destOffsetRight, destOffsetUp, destOffsetForward,
-                                              entityDots, deadlineNs);
+                                              entityDots, deadlineNs, completed);
+                if (!completed[0]) {
+                    // Render timed out — discard partial image, keep the last good texture.
+                    // This prevents a sky-filled partial frame from replacing a good one.
+                    final NativeImage discard = image;
+                    image = null;
+                    if (discard != null) { try { discard.close(); } catch (Exception ignored) {} }
+                    portalData.setCaptureInFlight(false);
+                    return;
+                }
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
                     try {
@@ -214,13 +224,14 @@ public class LocalizedChunkCapture {
                                                       float destOffsetRight, float destOffsetUp,
                                                       float destOffsetForward,
                                                       List<EntityDot> entityDots,
-                                                      long deadlineNs) {
+                                                      long deadlineNs, boolean[] completed) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
-        // Pre-fill with sky so budget-truncated partial renders show sky, not garbage memory.
-        int skyFill = toABGR(computeSkyColor(0));
+        // Pre-fill with black — visible only if a pixel's ray somehow produces no color,
+        // which shouldn't happen (ddaRay always returns sky on miss). Not sky-colored
+        // so a partial upload (if it ever slips through) is obviously wrong, not subtle.
         for (int fy = 0; fy < resH; fy++)
             for (int fx = 0; fx < resW; fx++)
-                image.setPixelRGBA(fx, fy, skyFill);
+                image.setPixelRGBA(fx, fy, 0xFF000000);
 
         double yawRad = Math.toRadians(yawDeg);
 
@@ -267,10 +278,11 @@ public class LocalizedChunkCapture {
 
         float[] depthBuf = new float[resW * resH];
 
+        completed[0] = false;
         for (int py = 0; py < resH; py++) {
-            // No budget cutoff — always render the full frame.
-            // Partial renders caused a sky band that bounced up/down each update.
-            // The in-flight boolean prevents double-submission; just let it finish.
+            // Per-row deadline check: if over budget, abort — the CALLER discards this
+            // partial image and keeps the last good texture. Never upload a partial frame.
+            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) return image;
 
             // py=0 → top of portal, py=resH-1 → floor
             double ndcY = (py + 0.5) / resH;
@@ -290,15 +302,13 @@ public class LocalizedChunkCapture {
                 if (len < 1e-9) { image.setPixelRGBA(px, py, toABGR(computeSkyColor(0))); continue; }
                 rdX /= len; rdY /= len; rdZ /= len;
 
-                // Push ray origin along the ray direction so it starts past the
-                // aperture plane and any block face flush against it.
-                // Using rdX/Y/Z (not fwd) handles angled rays correctly.
-                double startX = pixelX + rdX * 0.1;
-                double startY = pixelY + rdY * 0.1;
-                double startZ = pixelZ + rdZ * 0.1;
-
+                // Start the ray exactly at the aperture pixel.
+                // The DDA's explicit starting-block test handles blocks flush with
+                // the portal face. A push offset caused the starting block to land
+                // in the wrong cell for steep rays (top/bottom of portal), producing
+                // sky where there should be geometry.
                 int[] hitColor = new int[1];
-                float dist = ddaRay(level, startX, startY, startZ, rdX, rdY, rdZ, hitColor);
+                float dist = ddaRay(level, pixelX, pixelY, pixelZ, rdX, rdY, rdZ, hitColor);
 
                 image.setPixelRGBA(px, py, toABGR(hitColor[0]));
                 depthBuf[py * resW + px] = dist;
@@ -335,6 +345,7 @@ public class LocalizedChunkCapture {
 
         // No vertical flip — raycaster already writes py=0 as sky (top of image).
         // NativeImage in Minecraft is stored top-row-first matching GL_UNPACK_FLIP_ROW_ORDER.
+        completed[0] = true;
         return image;
     }
 
