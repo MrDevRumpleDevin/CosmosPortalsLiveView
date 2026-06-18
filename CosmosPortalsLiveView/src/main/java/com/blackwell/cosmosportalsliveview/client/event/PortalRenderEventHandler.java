@@ -248,7 +248,9 @@ public class PortalRenderEventHandler {
             if (Double.isNaN(data.destHoleCenterX) && data.destPos != null) {
                 Level destLevel = LocalizedChunkCapture.resolveSampleLevelPublic(data.destDimension, level);
                 if (destLevel != null) {
-                    scanDestHoleCenter(data, destLevel);
+                    // Pass source dimension so the scan can filter out source-side portal blocks.
+                    ResourceLocation sourceDimension = level.dimension().location();
+                    scanDestHoleCenter(data, destLevel, sourceDimension);
                 }
             }
 
@@ -297,12 +299,15 @@ public class PortalRenderEventHandler {
     }
 
     /**
-     * Scans the destination level around destPos for portal blocks, flood-fills them,
-     * and stores the hole's center X/Z and bottom Y onto data.
+     * Scans the destination level around destPos for portal blocks linked back to the
+     * source dimension, flood-fills them, and stores the hole's center X/Z and bottom Y.
+     * Filters by sourceDimension to avoid confusing source-side portal blocks with dest-side ones
+     * (critical when source and destination are in the same dimension).
      * Only called once per portal (when destHoleCenterX is NaN); retries if not found.
      */
-    private static void scanDestHoleCenter(PortalViewData data, Level destLevel) {
-        // Search for any BlockPortal block within a small radius of destPos
+    private static void scanDestHoleCenter(PortalViewData data, Level destLevel, ResourceLocation sourceDimension) {
+        // Search for a BlockPortal block near destPos that links BACK to the source dimension.
+        // Each BlockPortal at the destination has destDimension == source level's dimension.
         BlockPos origin = null;
         int searchR = 8;
         outer:
@@ -310,7 +315,11 @@ public class PortalRenderEventHandler {
             for (int dy = -searchR; dy <= searchR; dy++) {
                 for (int dz = -searchR; dz <= searchR; dz++) {
                     BlockPos candidate = data.destPos.offset(dx, dy, dz);
-                    if (destLevel.getBlockState(candidate).getBlock() instanceof BlockPortal) {
+                    if (!(destLevel.getBlockState(candidate).getBlock() instanceof BlockPortal)) continue;
+                    BlockEntity be = destLevel.getBlockEntity(candidate);
+                    if (!(be instanceof BlockEntityPortal portalTile)) continue;
+                    // This portal block links back to the source dimension — it's on the dest side.
+                    if (sourceDimension.equals(portalTile.destDimension)) {
                         origin = candidate;
                         break outer;
                     }
@@ -321,7 +330,8 @@ public class PortalRenderEventHandler {
             // No dest portal blocks found yet — leave NaN, will retry next frame
             return;
         }
-        Set<BlockPos> destBlocks = findConnectedPortalBlocks(destLevel, origin, 256);
+        // Flood-fill only portal blocks that link back to sourceDimension
+        Set<BlockPos> destBlocks = findConnectedPortalBlocksForDim(destLevel, origin, sourceDimension, 256);
         if (destBlocks.isEmpty()) return;
 
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
@@ -333,6 +343,34 @@ public class PortalRenderEventHandler {
         data.destHoleCenterX = (minX + maxX) / 2.0 + 0.5;
         data.destHoleCenterZ = (minZ + maxZ) / 2.0 + 0.5;
         data.destHoleBottomY = minY; // world Y of the lowest portal block floor
+    }
+
+    /**
+     * Flood-fill connected BlockPortal blocks whose destDimension matches targetDim.
+     */
+    private static Set<BlockPos> findConnectedPortalBlocksForDim(Level level, BlockPos origin,
+                                                                   ResourceLocation targetDim, int maxBlocks) {
+        Set<BlockPos> visited = new HashSet<>();
+        Queue<BlockPos> queue = new LinkedList<>();
+        queue.add(origin);
+        visited.add(origin);
+        int[] dxs = {1, -1, 0, 0, 0, 0};
+        int[] dys = {0, 0, 1, -1, 0, 0};
+        int[] dzs = {0, 0, 0, 0, 1, -1};
+        while (!queue.isEmpty() && visited.size() < maxBlocks) {
+            BlockPos cur = queue.poll();
+            for (int i = 0; i < 6; i++) {
+                BlockPos next = cur.offset(dxs[i], dys[i], dzs[i]);
+                if (visited.contains(next)) continue;
+                if (!(level.getBlockState(next).getBlock() instanceof BlockPortal)) continue;
+                BlockEntity be = level.getBlockEntity(next);
+                if (!(be instanceof BlockEntityPortal pt)) continue;
+                if (!targetDim.equals(pt.destDimension)) continue;
+                visited.add(next);
+                queue.add(next);
+            }
+        }
+        return visited;
     }
 
     /**
