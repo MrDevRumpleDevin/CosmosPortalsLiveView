@@ -268,7 +268,9 @@ public class LocalizedChunkCapture {
         float[] depthBuf = new float[resW * resH];
 
         for (int py = 0; py < resH; py++) {
-            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) break;
+            // No budget cutoff — always render the full frame.
+            // Partial renders caused a sky band that bounced up/down each update.
+            // The in-flight boolean prevents double-submission; just let it finish.
 
             // py=0 → top of portal, py=resH-1 → floor
             double ndcY = (py + 0.5) / resH;
@@ -373,6 +375,39 @@ public class LocalizedChunkCapture {
         // Accumulated translucent color (for glass stacking)
         int accumR = 0, accumG = 0, accumB = 0;
         float accumAlpha = 0f; // 0..1, how much of the final pixel is already determined
+
+        // ── Test the STARTING block before any DDA step ───────────────────────
+        // The standard DDA advances to the next boundary before testing, so the
+        // block that actually contains the ray origin (ox,oy,oz) is never visited.
+        // For portals, the first block is exactly the one flush against the portal
+        // face — the very one that was getting clipped. Test it explicitly at t=0.
+        {
+            BlockState startState = level.getBlockState(new BlockPos(bx, by, bz));
+            if (!startState.isAir() && startState.getRenderShape() != RenderShape.INVISIBLE) {
+                BlockPos startBp = new BlockPos(bx, by, bz);
+                QuadHit qh = intersectBlockQuads(startState, level, startBp,
+                                                  ox, oy, oz, dx, dy, dz, 0.0);
+                if (qh != null) {
+                    int baseColor = sampleHitPixel(qh, startState, level, startBp);
+                    int alpha = (baseColor >> 24) & 0xFF;
+                    if (alpha >= CUTOUT_ALPHA_THRESHOLD) {
+                        float ao = (qh.ny > 0.5) ? AO_TOP : (qh.ny < -0.5) ? AO_BOTTOM : AO_SIDE;
+                        int shadedColor = shadeColor(baseColor, ao);
+                        int sR = (shadedColor >> 16) & 0xFF;
+                        int sG = (shadedColor >>  8) & 0xFF;
+                        int sB =  shadedColor        & 0xFF;
+                        if (alpha >= TRANSLUCENT_ALPHA_THRESHOLD) {
+                            hit[0] = (0xFF << 24) | (sR << 16) | (sG << 8) | sB;
+                            return (float) qh.t;
+                        } else {
+                            float sA = alpha / 255.0f;
+                            accumR = (int)(sA * sR); accumG = (int)(sA * sG); accumB = (int)(sA * sB);
+                            accumAlpha = sA;
+                        }
+                    }
+                }
+            }
+        }
 
         while (t < MAX_RAY_DIST) {
             if (tMaxX < tMaxY && tMaxX < tMaxZ) { t = tMaxX; tMaxX += tDeltaX; bx += sx; }
@@ -505,7 +540,7 @@ public class LocalizedChunkCapture {
         // flush-face blocks to be culled.  Use a small epsilon only to skip self
         // (the aperture plane itself) and a generous tMax to catch any geometry.
         double tMin = 0.001;
-        double tMax = 2.5;
+        double tMax = 1.42; // diagonal of a unit cube — no valid quad can be further
 
         double bestT   = Double.MAX_VALUE;
         double bestNX  = 0, bestNY = 1, bestNZ = 0;
@@ -605,7 +640,7 @@ public class LocalizedChunkCapture {
         // flush-face blocks to be culled.  Use a small epsilon only to skip self
         // (the aperture plane itself) and a generous tMax to catch any geometry.
         double tMin = 0.001;
-        double tMax = 2.5;
+        double tMax = 1.42; // diagonal of a unit cube — no valid quad can be further
 
         double bestT = Double.MAX_VALUE;
         double bestNX = 0, bestNY = 1, bestNZ = 0;
