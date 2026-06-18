@@ -6,7 +6,9 @@
   "refmap": "cosmosportals_liveview.refmap.json",
   "client": [
     "MixinGameRenderer",
-    "MixinMainTarget"
+    "MixinMainTarget",
+    "MixinRenderTarget",
+    "MixinLevelRenderer"
   ],
   "injectors": {
     "defaultRequire": 1
