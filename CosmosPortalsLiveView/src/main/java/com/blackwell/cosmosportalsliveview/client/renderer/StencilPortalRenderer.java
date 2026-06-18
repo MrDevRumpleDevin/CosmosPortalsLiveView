@@ -1,14 +1,14 @@
 package com.blackwell.cosmosportalsliveview.client.renderer;
 
-import com.blackwell.cosmosportalsliveview.client.LiveViewState;
-import com.blackwell.cosmosportalsliveview.client.event.PortalRenderEventHandler;
+import com.blackwell.cosmosportalsliveview.ducks.IEFrameBuffer;
+import com.blackwell.cosmosportalsliveview.mixin.MixinLevelRenderer;
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
-import net.minecraft.core.BlockPos;
+import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -26,58 +26,83 @@ import java.util.List;
  *
  * Technique (mirrors Immersive Portals' RendererUsingStencil, simplified):
  *
- *  1. For each same-dimension portal in view:
- *     a. Write the portal quad silhouette into the stencil buffer (increment from 0→1).
- *        Color mask off — we only care about the stencil stamp.
- *     b. Clear depth to MAX (1.0) behind the stencil mask, so the destination
- *        world renders "through" the portal without fighting the source geometry.
- *     c. Translate the ModelView matrix so the camera appears at the destination
- *        position corresponding to the player's current position relative to the
- *        source portal.
- *     d. Re-render the level geometry clipped by the stencil mask (stencil == 1).
- *        This draws the destination view exactly where the portal hole is.
- *     e. Restore depth values over the portal hole (so source-side geometry that
- *        is closer than the portal plane correctly occludes the destination view).
- *     f. Reset stencil to 0 for the next portal.
+ *  1. Ensure the main framebuffer has a stencil attachment (lazy, one-time init).
+ *  2. Stamp the portal quad silhouette into the stencil buffer (color+depth writes off).
+ *  3. Clear depth to MAX (1.0) behind the stencil mask so the destination geometry
+ *     renders without fighting source-side depth.
+ *  4. Re-render solid/cutout chunk layers with the camera translated to the destination
+ *     position, clipped by the stencil mask.
+ *  5. Restore the portal quad's depth so source geometry in front of the portal face
+ *     correctly occludes the destination view.
+ *  6. Restore all GL state.
  *
  * Valkyrien Skies safety:
- *  - We never create a second ClientLevel or WorldRenderer.
- *  - We never modify entity transform matrices or contraption state.
- *  - All GL state is saved and restored around each portal render pass.
- *  - The stencil buffer itself is new to the framebuffer (vanilla has none), so
- *    VS has no existing stencil state to conflict with.
+ *  - No second ClientLevel or WorldRenderer created.
+ *  - No entity transforms or contraption state touched.
+ *  - All GL state saved/restored around the render pass.
+ *  - Stencil buffer is enabled lazily and only on the main RenderTarget.
  *
- * Fallback:
- *  If stencil is not functional (shader mods that replaced the framebuffer, or
- *  the MixinMainTarget injection was skipped), isStencilAvailable() returns false
- *  and the caller falls back to the raycaster for this portal.
+ * Shader mod fallback:
+ *  If the stencil buffer cannot be confirmed functional (Iris/OptiFine replaced the
+ *  framebuffer), isStencilAvailable() returns false and the caller falls back to the
+ *  raycaster for this portal.
  */
 @OnlyIn(Dist.CLIENT)
 public class StencilPortalRenderer {
 
-    // ── Stencil availability ──────────────────────────────────────────────────
+    // ── Stencil availability / lazy init ─────────────────────────────────────
 
-    private static Boolean stencilAvailable = null; // null = not yet probed
+    /** null = not yet probed, true/false = cached result */
+    private static Boolean stencilAvailable = null;
+    private static boolean stencilInitialized = false;
 
     /**
-     * Returns true if the main framebuffer has a functional stencil buffer.
-     * Result is cached after the first probe. Safe to call every frame.
+     * Ensures the main framebuffer has a stencil attachment, then probes whether
+     * it actually works. Called once on first portal render attempt.
+     * Safe to call every frame — subsequent calls are immediate no-ops.
      */
-    public static boolean isStencilAvailable() {
+    public static boolean ensureStencilAvailable() {
         if (stencilAvailable != null) return stencilAvailable;
-        // Probe: try to read the stencil buffer size. If it's 0, no stencil.
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.getMainRenderTarget() == null) return false;
+
+        if (!stencilInitialized) {
+            IEFrameBuffer iefb = (IEFrameBuffer) mc.getMainRenderTarget();
+            if (!iefb.getIsStencilBufferEnabled()) {
+                iefb.setIsStencilBufferEnabled(true);
+                // Resize to 0 then back to current size forces buffer reallocation
+                // with the new depth+stencil format.
+                mc.getMainRenderTarget().resize(
+                        mc.getMainRenderTarget().width,
+                        mc.getMainRenderTarget().height,
+                        Minecraft.ON_OSX
+                );
+            }
+            stencilInitialized = true;
+        }
+
+        // Probe: stencil bits > 0 means allocation succeeded.
         try {
             int bits = GL11.glGetInteger(GL30.GL_STENCIL_BITS);
             stencilAvailable = (bits > 0);
         } catch (Exception e) {
             stencilAvailable = false;
         }
+
+        if (!stencilAvailable) {
+            // Revert — we couldn't get a stencil buffer (shader mod replaced FBO, etc.)
+            // Don't keep resizing every frame.
+            stencilInitialized = true;
+        }
+
         return stencilAvailable;
     }
 
-    /** Called when the framebuffer is recreated (window resize, F3+T) to re-probe. */
+    /** Called on window resize or F3+T to force re-probe next frame. */
     public static void invalidateStencilCache() {
         stencilAvailable = null;
+        stencilInitialized = false;
     }
 
     // ── Public entry point ────────────────────────────────────────────────────
@@ -85,18 +110,13 @@ public class StencilPortalRenderer {
     /**
      * Attempts to render {@code data} using the stencil technique.
      *
-     * @param data       the portal to render
-     * @param poseStack  the current render pose stack (camera-relative)
-     * @param camera     the active camera
-     * @param partialTick partial tick for smooth rendering
-     * @return true if stencil rendering succeeded; false if the caller should
-     *         fall back to the raycaster.
+     * @return true if stencil rendering succeeded; false to fall back to raycaster.
      */
     public static boolean renderPortal(PortalViewData data,
                                        PoseStack poseStack,
                                        Camera camera,
                                        float partialTick) {
-        if (!isStencilAvailable()) return false;
+        if (!ensureStencilAvailable()) return false;
 
         Minecraft mc = Minecraft.getInstance();
         Level level = mc.level;
@@ -112,54 +132,51 @@ public class StencilPortalRenderer {
         // Need destination hole center to be scanned
         if (Double.isNaN(data.destHoleCenterX) || Double.isNaN(data.destHoleCenterZ)
                 || Double.isNaN(data.destHoleBottomY)) {
-            return false; // not ready yet — caller will use raycaster until scan completes
+            return false;
         }
 
         Vec3 camPos = camera.getPosition();
 
-        // ── Build portal quad vertices (camera-relative world space) ──────────
+        // Build portal quad vertices (camera-relative)
         List<float[]> quad = buildPortalQuad(data, camPos);
         if (quad == null) return false;
 
-        // ── Compute destination camera position ───────────────────────────────
-        // The player's offset from the source portal center, projected onto portal axes,
-        // is replicated at the destination portal. This is the "window" effect.
+        // Compute where the camera maps to on the destination side
         Vec3 destCamPos = computeDestCameraPos(data, camPos);
 
-        // ── GL state save ─────────────────────────────────────────────────────
-        boolean depthTestWasEnabled = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
-        boolean stencilWasEnabled   = GL11.glIsEnabled(GL11.GL_STENCIL_TEST);
-        int[] prevStencilFunc = new int[3]; // func, ref, mask
-        GL11.glGetIntegerv(GL11.GL_STENCIL_FUNC,   new java.nio.IntBuffer[] { null }[0]); // dummy - use individual gets
-        int prevStencilFuncVal  = GL11.glGetInteger(GL11.GL_STENCIL_FUNC);
-        int prevStencilRef      = GL11.glGetInteger(GL11.GL_STENCIL_REF);
-        int prevStencilMask     = GL11.glGetInteger(GL11.GL_STENCIL_VALUE_MASK);
-        int prevDepthFunc       = GL11.glGetInteger(GL11.GL_DEPTH_FUNC);
+        // Camera-relative translation delta
+        double dx = destCamPos.x - camPos.x;
+        double dy = destCamPos.y - camPos.y;
+        double dz = destCamPos.z - camPos.z;
+
+        // Grab current projection matrix BEFORE we touch anything
+        Matrix4f projMatrix = RenderSystem.getProjectionMatrix();
+
+        // Save GL state
+        boolean depthTestEnabled = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
+        boolean stencilWasEnabled = GL11.glIsEnabled(GL11.GL_STENCIL_TEST);
+        int prevStencilFuncVal = GL11.glGetInteger(GL11.GL_STENCIL_FUNC);
+        int prevStencilRef     = GL11.glGetInteger(GL11.GL_STENCIL_REF);
+        int prevStencilMask    = GL11.glGetInteger(GL11.GL_STENCIL_VALUE_MASK);
+        int prevDepthFunc      = GL11.glGetInteger(GL11.GL_DEPTH_FUNC);
 
         try {
-            // ── Step 1: Stamp portal shape into stencil ───────────────────────
+            // ── Step 1: stamp portal shape into stencil ───────────────────────
             GL11.glEnable(GL11.GL_STENCIL_TEST);
             GL11.glClearStencil(0);
-            // Only clear the stencil in the portal's screen-space AABB for perf,
-            // but a full clear is safer and correct for a single portal per frame.
             GL11.glClear(GL11.GL_STENCIL_BUFFER_BIT);
 
-            // Pass if stencil == 0 (fresh), write 1 on pass
             GL11.glStencilFunc(GL11.GL_EQUAL, 0, 0xFF);
             GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_INCR);
             GL11.glStencilMask(0xFF);
 
-            // Color + depth writes off — stencil stamp only
             RenderSystem.colorMask(false, false, false, false);
             RenderSystem.depthMask(false);
             RenderSystem.enableDepthTest();
 
             drawPortalQuad(poseStack, quad);
 
-            // ── Step 2: Clear depth behind the stencil mask ───────────────────
-            // Where stencil == 1, write depth = 1.0 (furthest possible).
-            // This carves a "hole" through the depth buffer so the destination
-            // world renders without fighting source-side geometry.
+            // ── Step 2: clear depth behind the stencil mask ───────────────────
             GL11.glStencilFunc(GL11.GL_EQUAL, 1, 0xFF);
             GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
 
@@ -168,22 +185,40 @@ public class StencilPortalRenderer {
             GL11.glDepthFunc(GL11.GL_ALWAYS);
             GL11.glDepthRange(1.0, 1.0);
 
-            drawFullscreenQuad(); // fills depth = 1.0 everywhere stencil == 1
+            drawFullscreenTriangle();
 
             GL11.glDepthRange(0.0, 1.0);
             GL11.glDepthFunc(prevDepthFunc);
 
-            // ── Step 3: Render destination world through the stencil hole ─────
+            // ── Step 3: render destination world through the stencil hole ─────
             RenderSystem.colorMask(true, true, true, true);
             RenderSystem.depthMask(true);
             GL11.glStencilFunc(GL11.GL_EQUAL, 1, 0xFF);
             GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
 
-            renderDestinationWorld(mc, poseStack, destCamPos, camPos, partialTick);
+            poseStack.pushPose();
+            poseStack.translate(-dx, -dy, -dz);
 
-            // ── Step 4: Restore depth over the portal hole ────────────────────
-            // Write the portal quad's actual depth values back so geometry in
-            // front of the portal plane in the source world correctly occludes.
+            MixinLevelRenderer accessor = (MixinLevelRenderer) mc.levelRenderer;
+            try {
+                accessor.cosmosLiveView_renderChunkLayer(
+                        RenderType.solid(), poseStack,
+                        destCamPos.x, destCamPos.y, destCamPos.z, projMatrix);
+                accessor.cosmosLiveView_renderChunkLayer(
+                        RenderType.cutoutMipped(), poseStack,
+                        destCamPos.x, destCamPos.y, destCamPos.z, projMatrix);
+                accessor.cosmosLiveView_renderChunkLayer(
+                        RenderType.cutout(), poseStack,
+                        destCamPos.x, destCamPos.y, destCamPos.z, projMatrix);
+            } catch (Exception e) {
+                // Never crash during render — log and eat the exception
+                org.apache.logging.log4j.LogManager.getLogger("CosmosLiveView")
+                    .warn("[StencilPortalRenderer] renderChunkLayer failed: {}", e.getMessage());
+            }
+
+            poseStack.popPose();
+
+            // ── Step 4: restore depth over the portal hole ────────────────────
             GL11.glStencilFunc(GL11.GL_EQUAL, 1, 0xFF);
             GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
 
@@ -191,21 +226,18 @@ public class StencilPortalRenderer {
             RenderSystem.depthMask(true);
             GL11.glDepthFunc(GL11.GL_ALWAYS);
 
-            drawPortalQuad(poseStack, quad); // writes portal surface depth
+            drawPortalQuad(poseStack, quad);
 
             GL11.glDepthFunc(prevDepthFunc);
 
         } finally {
-            // ── GL state restore ──────────────────────────────────────────────
+            // ── Restore all GL state ──────────────────────────────────────────
             RenderSystem.colorMask(true, true, true, true);
             RenderSystem.depthMask(true);
-
-            if (depthTestWasEnabled) RenderSystem.enableDepthTest();
+            if (depthTestEnabled) RenderSystem.enableDepthTest();
             else RenderSystem.disableDepthTest();
-
             if (stencilWasEnabled) GL11.glEnable(GL11.GL_STENCIL_TEST);
             else GL11.glDisable(GL11.GL_STENCIL_TEST);
-
             GL11.glStencilFunc(prevStencilFuncVal, prevStencilRef, prevStencilMask);
             GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
             GL11.glStencilMask(0xFF);
@@ -217,130 +249,43 @@ public class StencilPortalRenderer {
     // ── Camera transform ──────────────────────────────────────────────────────
 
     /**
-     * Maps the player's camera position through the portal.
-     *
-     * The player's offset from the SOURCE portal center (in portal-local space)
-     * is added to the DESTINATION portal center. This makes the destination world
-     * appear as if the portal is a window: moving left reveals more of the right
-     * side of the destination room, exactly like Immersive Portals.
-     *
-     * Portal-local axes:
-     *   right = along the portal face (X for axis=Z portals, Z for axis=X portals)
-     *   up    = +Y
-     *   fwd   = portal normal (into the room)
+     * Maps the player camera through the portal: offset from source portal center
+     * is preserved and re-applied at the destination portal center.
      */
     private static Vec3 computeDestCameraPos(PortalViewData data, Vec3 camPos) {
-        // Source portal center (block center)
-        double srcCenterX = data.portalPos.getX() + 0.5;
-        double srcCenterY = data.portalPos.getY() + 0.5;
-        double srcCenterZ = data.portalPos.getZ() + 0.5;
+        double srcCX = data.portalPos.getX() + 0.5;
+        double srcCY = data.portalPos.getY() + 0.5;
+        double srcCZ = data.portalPos.getZ() + 0.5;
 
-        // Player offset from source portal center
-        double offsetX = camPos.x - srcCenterX;
-        double offsetY = camPos.y - srcCenterY;
-        double offsetZ = camPos.z - srcCenterZ;
+        double offX = camPos.x - srcCX;
+        double offY = camPos.y - srcCY;
+        double offZ = camPos.z - srcCZ;
 
-        // Destination portal center
-        double dstCenterX = Double.isNaN(data.destHoleCenterX)
-                ? data.destPos.getX() + 0.5 : data.destHoleCenterX;
-        double dstCenterY = data.destHoleBottomY + data.portalHalfH;
-        double dstCenterZ = Double.isNaN(data.destHoleCenterZ)
-                ? data.destPos.getZ() + 0.5 : data.destHoleCenterZ;
+        double dstCX = data.destHoleCenterX;
+        double dstCY = data.destHoleBottomY + data.portalHalfH;
+        double dstCZ = data.destHoleCenterZ;
 
-        // Portal orientation yaw (stored as the DESTINATION yaw — direction you'd
-        // be looking when you step through). The portal face normal is perpendicular to this.
-        double yawRad   = Math.toRadians(data.destYaw);
-        // fwd points into the destination room (away from the portal face)
-        double fwdX = -Math.sin(yawRad);
-        double fwdZ =  Math.cos(yawRad);
-        // right is perpendicular to fwd in the horizontal plane
+        double yawRad = Math.toRadians(data.destYaw);
+        double fwdX   = -Math.sin(yawRad);
+        double fwdZ   =  Math.cos(yawRad);
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
 
-        // Decompose player offset into portal-local components
-        double localRight   = offsetX * rightX + offsetZ * rightZ;
-        double localUp      = offsetY;
-        // forward component: how far in front of (or behind) the portal face
-        double localForward = offsetX * fwdX   + offsetZ * fwdZ;
+        double localRight   = offX * rightX + offZ * rightZ;
+        double localUp      = offY;
+        double localForward = offX * fwdX   + offZ * fwdZ;
 
-        // Re-apply offset at destination — mirror right/up, preserve forward sign
-        // so the camera is the same distance in front of the dest portal.
         return new Vec3(
-                dstCenterX + localRight * rightX + localForward * fwdX,
-                dstCenterY + localUp,
-                dstCenterZ + localRight * rightZ + localForward * fwdZ
+                dstCX + localRight * rightX + localForward * fwdX,
+                dstCY + localUp,
+                dstCZ + localRight * rightZ + localForward * fwdZ
         );
-    }
-
-    // ── World re-render ───────────────────────────────────────────────────────
-
-    /**
-     * Re-renders the level from {@code destCamPos} with the stencil mask active.
-     * Only solid/cutout geometry is rendered (no translucent pass — keeps it fast
-     * and avoids blending artifacts from nested transparency).
-     *
-     * We translate the model-view matrix instead of actually moving the camera
-     * entity, so no game state is modified.
-     */
-    private static void renderDestinationWorld(Minecraft mc,
-                                                PoseStack poseStack,
-                                                Vec3 destCamPos,
-                                                Vec3 origCamPos,
-                                                float partialTick) {
-        // The level renderer works in camera-relative coordinates.
-        // Shift = destCamPos - origCamPos expressed as a matrix translation.
-        double dx = destCamPos.x - origCamPos.x;
-        double dy = destCamPos.y - origCamPos.y;
-        double dz = destCamPos.z - origCamPos.z;
-
-        poseStack.pushPose();
-        // Translate so geometry at destCamPos appears at the screen origin.
-        // We negate because the modelview is camera→world, and we want to
-        // shift the world by -delta to move the virtual camera by +delta.
-        poseStack.translate(-dx, -dy, -dz);
-
-        // Re-render solid+cutout chunks using the existing world renderer.
-        // This is the same call path Minecraft uses every frame — no custom
-        // renderer needed. The stencil mask ensures only portal pixels are written.
-        try {
-            mc.levelRenderer.renderChunkLayer(
-                    net.minecraft.client.renderer.RenderType.solid(),
-                    poseStack,
-                    destCamPos.x, destCamPos.y, destCamPos.z,
-                    RenderSystem.getModelViewMatrix()
-            );
-            mc.levelRenderer.renderChunkLayer(
-                    net.minecraft.client.renderer.RenderType.cutoutMipped(),
-                    poseStack,
-                    destCamPos.x, destCamPos.y, destCamPos.z,
-                    RenderSystem.getModelViewMatrix()
-            );
-            mc.levelRenderer.renderChunkLayer(
-                    net.minecraft.client.renderer.RenderType.cutout(),
-                    poseStack,
-                    destCamPos.x, destCamPos.y, destCamPos.z,
-                    RenderSystem.getModelViewMatrix()
-            );
-        } catch (Exception e) {
-            // Never crash the game — if the level renderer throws (e.g. during
-            // world load/unload transitions), log and skip silently.
-            net.minecraft.client.Minecraft.getInstance().player.displayClientMessage(
-                net.minecraft.network.chat.Component.literal(
-                    "[CosmosLiveView] stencil render error: " + e.getMessage()), true);
-        }
-
-        poseStack.popPose();
     }
 
     // ── Geometry helpers ──────────────────────────────────────────────────────
 
-    /**
-     * Builds the portal quad as a list of 4 camera-relative XYZ vertices
-     * (bottom-left, bottom-right, top-right, top-left — CCW when viewed from front).
-     * Returns null if orientation data is insufficient.
-     */
+    /** Builds 4 camera-relative XYZW vertices for the portal quad. */
     private static List<float[]> buildPortalQuad(PortalViewData data, Vec3 camPos) {
-        // Portal center in world space
         double cx = data.portalPos.getX() + 0.5;
         double cy = data.portalPos.getY() + 0.5;
         double cz = data.portalPos.getZ() + 0.5;
@@ -348,12 +293,10 @@ public class StencilPortalRenderer {
         float hw = data.portalHalfW;
         float hh = data.portalHalfH;
 
-        // Portal right-axis in world XZ (same convention as the raycaster)
-        double yawRad  = Math.toRadians(data.destYaw);
-        double rightX  =  Math.cos(yawRad);
-        double rightZ  =  Math.sin(yawRad);
+        double yawRad = Math.toRadians(data.destYaw);
+        double rightX =  Math.cos(yawRad);
+        double rightZ =  Math.sin(yawRad);
 
-        // Camera-relative center
         float rx = (float)(cx - camPos.x);
         float ry = (float)(cy - camPos.y);
         float rz = (float)(cz - camPos.z);
@@ -362,7 +305,6 @@ public class StencilPortalRenderer {
         float drz = (float)(rightZ * hw);
 
         List<float[]> quad = new ArrayList<>(4);
-        // BL, BR, TR, TL (CCW from front face)
         quad.add(new float[]{ rx - drx, ry - hh, rz - drz });
         quad.add(new float[]{ rx + drx, ry - hh, rz + drz });
         quad.add(new float[]{ rx + drx, ry + hh, rz + drz });
@@ -370,13 +312,11 @@ public class StencilPortalRenderer {
         return quad;
     }
 
-    /** Draws the portal quad (no texture, no color — stencil/depth writes only). */
+    /** Draws the portal quad geometry using the POSITION shader. */
     private static void drawPortalQuad(PoseStack poseStack, List<float[]> quad) {
         Tesselator tess = Tesselator.getInstance();
         BufferBuilder buf = tess.getBuilder();
-
         Matrix4f mat = poseStack.last().pose();
-
         RenderSystem.setShader(GameRenderer::getPositionShader);
         buf.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
         for (float[] v : quad) {
@@ -386,33 +326,36 @@ public class StencilPortalRenderer {
     }
 
     /**
-     * Draws a full-screen quad at depth=1.0 (used to flood-fill depth behind stencil).
-     * Works in clip space so it's independent of the current modelview matrix.
+     * Draws a clip-space triangle covering the entire screen at depth=1.0.
+     * Used to flood depth behind the stencil mask.
+     * Uses a single oversized triangle instead of a quad — avoids the diagonal seam
+     * that can appear with two triangles at identical depth.
      */
-    private static void drawFullscreenQuad() {
+    private static void drawFullscreenTriangle() {
         Tesselator tess = Tesselator.getInstance();
         BufferBuilder buf = tess.getBuilder();
 
-        // Use identity matrix — clip-space quad covers NDC [-1,1]²
-        RenderSystem.setShader(GameRenderer::getPositionShader);
-
-        // Temporarily push identity matrices
+        // Save + replace both matrices with identity for clip-space drawing
         RenderSystem.getModelViewStack().pushPose();
         RenderSystem.getModelViewStack().setIdentity();
         RenderSystem.applyModelViewMatrix();
 
-        Matrix4f identity = new Matrix4f().identity();
-        RenderSystem.setProjectionMatrix(identity);
+        Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
+        Matrix4f identityProj = new Matrix4f().identity();
+        RenderSystem.setProjectionMatrix(identityProj, com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
 
-        buf.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
-        buf.vertex(identity, -1f, -1f, 1f).endVertex();
-        buf.vertex(identity,  1f, -1f, 1f).endVertex();
-        buf.vertex(identity,  1f,  1f, 1f).endVertex();
-        buf.vertex(identity, -1f,  1f, 1f).endVertex();
+        RenderSystem.setShader(GameRenderer::getPositionShader);
+        buf.begin(VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION);
+        // One oversized triangle covers the entire NDC [-1,1]^2 viewport.
+        // Vertices at z=1.0 (far plane in NDC after depth range 1,1 set by caller).
+        buf.vertex(identityProj, -1f, -1f, 1f).endVertex();
+        buf.vertex(identityProj,  3f, -1f, 1f).endVertex();
+        buf.vertex(identityProj, -1f,  3f, 1f).endVertex();
         tess.end();
 
+        // Restore projection
+        RenderSystem.setProjectionMatrix(savedProj, com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
         RenderSystem.getModelViewStack().popPose();
         RenderSystem.applyModelViewMatrix();
-        // Projection matrix will be restored by the caller's GL state restore.
     }
 }
