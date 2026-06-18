@@ -39,8 +39,6 @@ public class PortalViewData {
      */
     public volatile float portalHalfW = 1.0f;
     public volatile float portalHalfH = 1.0f;
-    /** True = portal spans X axis, face normal is ±Z. False = spans Z, face normal ±X. */
-    public volatile boolean portalAxisIsX = true;
 
     /**
      * World Y of the lowest portal block's floor (integer — the minY block's bottom face).
@@ -56,15 +54,6 @@ public class PortalViewData {
     public volatile double destHoleCenterX = Double.NaN;
     public volatile double destHoleCenterZ = Double.NaN;
     public volatile double destHoleBottomY = Double.NaN;
-
-    /**
-     * Forward direction for rays at the destination — the unit vector pointing INTO the
-     * destination room, perpendicular to the dest portal face.
-     * Determined by probing which side of the dest portal has non-portal solid blocks.
-     * NaN = not yet determined (scan hasn't run or probe was inconclusive).
-     */
-    public volatile double destFwdX = Double.NaN;
-    public volatile double destFwdZ = Double.NaN;
 
     /**
      * Player's lateral offset from the portal center projected onto the portal's

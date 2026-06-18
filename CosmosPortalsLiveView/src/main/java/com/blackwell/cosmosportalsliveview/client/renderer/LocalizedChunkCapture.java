@@ -47,7 +47,7 @@ import java.util.concurrent.Executors;
 public class LocalizedChunkCapture {
 
     private static final float  VIRTUAL_SCREEN_DIST = 2.0f;
-    private static final float  EYE_FORWARD_OFFSET  = 0.0f;
+    private static final float  EYE_FORWARD_OFFSET  = -1.0f;
     private static final float  PLAYER_EYE_HEIGHT   = 1.62f;
     private static final int    MAX_RAY_DIST        = 48;
     private static final double ENTITY_SCAN_RADIUS  = 32.0;
@@ -116,8 +116,6 @@ public class LocalizedChunkCapture {
             resW = Math.max(16, Math.min(baseRes, (int)(baseRes * aspect)));
         }
 
-        // Skip render until dest forward direction is known (scanDestHoleCenter not done yet)
-        if (Double.isNaN(portalData.destFwdX)) return;
         portalData.setCaptureInFlight(true);
         // Stamp time NOW (at submission) so shouldUpdateCapture backs off for this portal
         // immediately, freeing capturedThisFrame slots for other portals next frame.
@@ -128,9 +126,8 @@ public class LocalizedChunkCapture {
         final Level    levelSnap = sampleLevel;
         final int      resWSnap  = resW;
         final int      resHSnap  = resH;
-        // Ray forward direction probed geometrically at scan time — stored in destFwdX/Z.
-        final double   destFwdX  = portalData.destFwdX;
-        final double   destFwdZ  = portalData.destFwdZ;
+        final float    yaw       = portalData.destYaw;
+        final float    pitch     = portalData.destPitch;
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
         // Use the smoothed parallax values so the raycaster sees a continuously
@@ -154,8 +151,7 @@ public class LocalizedChunkCapture {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
-                image = renderPerspectiveView(levelSnap,
-                                              destFwdX, destFwdZ,
+                image = renderPerspectiveView(levelSnap, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
@@ -208,7 +204,7 @@ public class LocalizedChunkCapture {
     // ── Renderer ───────────────────────────────────────────────────────────────
 
     private static NativeImage renderPerspectiveView(Level level,
-                                                      double destFwdX, double destFwdZ,
+                                                      float yawDeg, float pitchDeg,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp,
@@ -226,20 +222,19 @@ public class LocalizedChunkCapture {
             for (int fx = 0; fx < resW; fx++)
                 image.setPixelRGBA(fx, fy, skyFill);
 
-        // ── Forward / right basis from geometrically-probed dest room direction ──
-        //
-        // destFwdX/Z were determined by scanDestHoleCenter() which counts solid blocks
-        // on each side of the dest portal and picks the side with more blocks as "the room".
-        // This avoids the ±ambiguity of axis+parallaxForward sign that plagued previous attempts.
-        //
-        // right = cross(fwd, up) = cross((fwdX,0,fwdZ), (0,1,0)) = (-fwdZ, 0, fwdX)
-        //   fwd=(0,0,-1) → right=(1,0,0)   ✓  (north-facing portal, right is +X)
-        //   fwd=(-1,0,0) → right=(0,0,-1)  ✓  (east-facing portal, right is -Z)
-        double fwdX   = destFwdX;
-        double fwdZ   = destFwdZ;
-        double fwdY   = 0.0;
-        double rightX = -fwdZ;
-        double rightZ =  fwdX;
+        double yawRad = Math.toRadians(yawDeg);
+        // Always render horizontally — ignore stored pitch so the baseline view
+        // is always eye-level through the portal, not tilted up/down from when
+        // the portal was linked.
+        // pitchDeg is kept as a parameter for API compatibility but not used here.
+
+        double fwdX = -Math.sin(yawRad);
+        double fwdY =  0.0;
+        double fwdZ =  Math.cos(yawRad);
+
+        // ── Basis vectors ──────────────────────────────────────────────────────────
+        double rightX =  Math.cos(yawRad);
+        double rightZ =  Math.sin(yawRad);
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;
