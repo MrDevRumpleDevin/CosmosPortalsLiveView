@@ -126,8 +126,11 @@ public class LocalizedChunkCapture {
         final Level    levelSnap = sampleLevel;
         final int      resWSnap  = resW;
         final int      resHSnap  = resH;
-        final float    yaw       = portalData.destYaw;
-        final float    pitch     = portalData.destPitch;
+        // CosmosPortals stores yaw/pitch with labels swapped (Vec2.x=pitch stored as "pos_yaw",
+        // Vec2.y=yaw stored as "pos_pitch"). So destInfo.getYaw() is actually the player's pitch
+        // and destInfo.getPitch() is actually the player's yaw. Use destPitch as the ray yaw.
+        final float    yaw       = portalData.destPitch;   // real horizontal yaw
+        final float    pitch     = portalData.destYaw;     // real vertical pitch (unused)
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
         // Use the smoothed parallax values so the raycaster sees a continuously
