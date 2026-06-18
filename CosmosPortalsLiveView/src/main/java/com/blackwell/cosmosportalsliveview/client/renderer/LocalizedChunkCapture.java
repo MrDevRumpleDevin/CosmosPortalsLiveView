@@ -102,7 +102,7 @@ public class LocalizedChunkCapture {
         if (sampleLevel == null) return;
 
         int baseRes = PortalLiveViewConfig.CAPTURE_RESOLUTION.get();
-        baseRes = Math.max(64, Math.min(baseRes, 512));
+        baseRes = Math.max(64, Math.min(baseRes, 1024));
 
         float halfW  = Math.max(0.5f, portalData.portalHalfW);
         float halfH  = Math.max(0.5f, portalData.portalHalfH);
@@ -256,9 +256,9 @@ public class LocalizedChunkCapture {
         // giving the scene real 3D depth.
         // parallaxUp is the player eye height above the portal floor — the eye at
         // the destination rises/falls to match, keeping floors and ceilings aligned.
-        double eyeX = apertureX + fwdX * EYE_FORWARD_OFFSET + rightX * parallaxRight;
+        double eyeX = apertureX + fwdX * EYE_FORWARD_OFFSET - rightX * parallaxRight;
         double eyeY = apertureBottomY + parallaxUp;          // eye height from aperture floor
-        double eyeZ = apertureZ + fwdZ * EYE_FORWARD_OFFSET + rightZ * parallaxRight;
+        double eyeZ = apertureZ + fwdZ * EYE_FORWARD_OFFSET - rightZ * parallaxRight;
 
         // ── Bottom-left corner of the aperture plane ─────────────────────────────
         double leftEdgeX = apertureX - rightX * portalHalfW;
@@ -288,11 +288,12 @@ public class LocalizedChunkCapture {
                 if (len < 1e-9) { image.setPixelRGBA(px, py, toABGR(computeSkyColor(0))); continue; }
                 rdX /= len; rdY /= len; rdZ /= len;
 
-                // Ray starts just past the aperture plane (avoid self-intersection
-                // with portal face blocks); origin = aperture pixel + tiny push forward
-                double startX = pixelX + fwdX * 0.05;
-                double startY = pixelY + rdY  * 0.05;
-                double startZ = pixelZ + fwdZ * 0.05;
+                // Push ray origin along the ray direction so it starts past the
+                // aperture plane and any block face flush against it.
+                // Using rdX/Y/Z (not fwd) handles angled rays correctly.
+                double startX = pixelX + rdX * 0.1;
+                double startY = pixelY + rdY * 0.1;
+                double startZ = pixelZ + rdZ * 0.1;
 
                 int[] hitColor = new int[1];
                 float dist = ddaRay(level, startX, startY, startZ, rdX, rdY, rdZ, hitColor);
