@@ -5,7 +5,8 @@
   "compatibilityLevel": "JAVA_8",
   "refmap": "cosmosportals_liveview.refmap.json",
   "client": [
-    "MixinGameRenderer"
+    "MixinGameRenderer",
+    "MixinMainTarget"
   ],
   "injectors": {
     "defaultRequire": 1
