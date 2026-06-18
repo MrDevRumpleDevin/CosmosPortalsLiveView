@@ -97,6 +97,10 @@ public class PortalViewData {
 
     /** True while a background capture is in progress — prevents duplicate submissions. */
     private final AtomicBoolean captureInFlight = new AtomicBoolean(false);
+    /** Wall-clock ms when captureInFlight was last set true. Used to detect stuck captures. */
+    private volatile long captureSubmitTime = 0L;
+    /** If captureInFlight has been true for longer than this, treat it as stuck and reset. */
+    private static final long CAPTURE_STALE_MS = 10_000L; // 10 seconds
 
     public PortalViewData(BlockEntityPortal entity, BlockPos portalPos) {
         this.portalPos = portalPos;
@@ -174,5 +178,16 @@ public class PortalViewData {
 
     public void setCaptureInFlight(boolean inFlight) {
         captureInFlight.set(inFlight);
+        if (inFlight) captureSubmitTime = System.currentTimeMillis();
+    }
+
+    /**
+     * Returns true if captureInFlight has been true for longer than CAPTURE_STALE_MS.
+     * Used by captureAsync to force-reset a permanently stuck in-flight flag.
+     */
+    public boolean isCaptureStale() {
+        return captureInFlight.get()
+            && (System.currentTimeMillis() - captureSubmitTime) > CAPTURE_STALE_MS;
     }
 }
+
