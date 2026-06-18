@@ -62,7 +62,19 @@ public class FboCapture {
 
     // ── Entry point (called from mixin) ────────────────────────────────────────
 
+    /**
+     * DISABLED — FboCapture uses a single virtual camera POV, which produces a
+     * peephole/fisheye look rather than a true window/hole effect.
+     * The raycaster in LocalizedChunkCapture is the correct rendering path.
+     * This method is intentionally a no-op. MixinGameRenderer still references
+     * this class but the call is also commented out there, so nothing runs.
+     * Do not re-enable without replacing the architecture with a proper
+     * orthographic/window approach.
+     */
     public static void onRenderLevelTail(float partialTick) {
+        // Permanently disabled — see javadoc above.
+        return;
+        /*  Original FBO code preserved below for reference only — do not uncomment.
         if (!PortalLiveViewConfig.ENABLE_LIVE_VIEW.get()) return;
 
         Minecraft mc = Minecraft.getInstance();
@@ -112,7 +124,10 @@ public class FboCapture {
         }
     }
 
-    // ── Per-portal FBO render ──────────────────────────────────────────────────
+        */ // end of disabled FBO code
+    }
+
+    // ── Per-portal FBO render (DEAD CODE — kept for reference only) ────────────
 
     private static void capturePortal(Minecraft mc, PortalViewData data,
                                        int resolution, float partialTick) throws Exception {
@@ -305,3 +320,4 @@ public class FboCapture {
         camInitializedField = null;
     }
 }
+
