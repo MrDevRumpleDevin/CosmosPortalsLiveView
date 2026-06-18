@@ -240,11 +240,13 @@ public class LocalizedChunkCapture {
         double portalHeight = portalHalfH * 2.0;
 
         // Centre of the aperture plane (world-space).
-        // destOffsetRight/Up let the wand shift the viewed region; they move the
-        // aperture centre, not the eye, so the window crops a different area.
-        double apertureX = destHoleCenterX + rightX * destOffsetRight;
-        double apertureY = destHoleBottomY + portalHalfH + destOffsetUp; // vertical center
-        double apertureZ = destHoleCenterZ + rightZ * destOffsetRight;
+        // destOffsetRight/Up/Forward shift the aperture window itself (wand tuning).
+        // Forward shifts the aperture plane along fwd — changing which depth slice
+        // is framed. Right/Up slide the aperture laterally/vertically.
+        double apertureX = destHoleCenterX + rightX * destOffsetRight + fwdX * destOffsetForward;
+        double apertureBottomY = destHoleBottomY + destOffsetUp;          // bottom of shifted aperture
+        double apertureY = apertureBottomY + portalHalfH;                 // vertical centre
+        double apertureZ = destHoleCenterZ + rightZ * destOffsetRight + fwdZ * destOffsetForward;
 
         // ── Eye position ─────────────────────────────────────────────────────────
         // Eye sits EYE_FORWARD_OFFSET blocks behind the aperture INTO the room
@@ -254,14 +256,13 @@ public class LocalizedChunkCapture {
         // giving the scene real 3D depth.
         // parallaxUp is the player eye height above the portal floor — the eye at
         // the destination rises/falls to match, keeping floors and ceilings aligned.
-        double eyeForward = EYE_FORWARD_OFFSET + destOffsetForward; // negative = behind face
-        double eyeX = apertureX + fwdX * eyeForward + rightX * parallaxRight;
-        double eyeY = destHoleBottomY + parallaxUp;          // eye height from dest floor
-        double eyeZ = apertureZ + fwdZ * eyeForward + rightZ * parallaxRight;
+        double eyeX = apertureX + fwdX * EYE_FORWARD_OFFSET + rightX * parallaxRight;
+        double eyeY = apertureBottomY + parallaxUp;          // eye height from aperture floor
+        double eyeZ = apertureZ + fwdZ * EYE_FORWARD_OFFSET + rightZ * parallaxRight;
 
         // ── Bottom-left corner of the aperture plane ─────────────────────────────
         double leftEdgeX = apertureX - rightX * portalHalfW;
-        double leftEdgeY = destHoleBottomY;                   // bottom of portal
+        double leftEdgeY = apertureBottomY;                   // bottom of portal (shifted)
         double leftEdgeZ = apertureZ - rightZ * portalHalfW;
 
         float[] depthBuf = new float[resW * resH];
@@ -313,7 +314,7 @@ public class LocalizedChunkCapture {
             double projRight = (dx * rightX + dz * rightZ) / depth;
             double projUp    = dy / depth;
             // Convert to aperture-plane offset from centre, then to pixel coords
-            double apertureEyeDist = Math.abs(eyeForward);
+            double apertureEyeDist = Math.abs(EYE_FORWARD_OFFSET);
             double screenRight = projRight * apertureEyeDist;
             double screenUp    = projUp    * apertureEyeDist;
             int screenX = (int)((screenRight / portalWidth  + 0.5) * resW);

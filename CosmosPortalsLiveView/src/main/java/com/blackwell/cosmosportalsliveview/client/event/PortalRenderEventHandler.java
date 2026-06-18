@@ -624,22 +624,25 @@ public class PortalRenderEventHandler {
                                              PortalViewData data,
                                              Camera camera,
                                              Level level) {
-        // Reconstruct dest eye centre (same math as LocalizedChunkCapture)
+        // ── Mirror LocalizedChunkCapture aperture math exactly ───────────────────
         double yawRad = Math.toRadians(data.destYaw);
-        double fwdX = -Math.sin(yawRad);
-        double fwdZ =  Math.cos(yawRad);
+        double fwdX   = -Math.sin(yawRad);
+        double fwdZ   =  Math.cos(yawRad);
         double rightX =  Math.cos(yawRad);
         double rightZ =  Math.sin(yawRad);
 
-        final float EYE_FORWARD_OFFSET = 0.0f;
+        // Dest hole centre (scanned), fall back to destPos centre if not yet scanned
+        double holeCenterX = Double.isNaN(data.destHoleCenterX)
+                ? data.destPos.getX() + 0.5 : data.destHoleCenterX;
+        double holeCenterZ = Double.isNaN(data.destHoleCenterZ)
+                ? data.destPos.getZ() + 0.5 : data.destHoleCenterZ;
+        double holeBottomY = Double.isNaN(data.destHoleBottomY)
+                ? data.portalBottomY : data.destHoleBottomY;
 
-        double cx = data.destPos.getX() + 0.5
-                + fwdX * (EYE_FORWARD_OFFSET + data.destOffsetForward)
-                + rightX * data.destOffsetRight;
-        double cy = data.portalBottomY + data.portalHalfH + data.destOffsetUp;
-        double cz = data.destPos.getZ() + 0.5
-                + fwdZ * (EYE_FORWARD_OFFSET + data.destOffsetForward)
-                + rightZ * data.destOffsetRight;
+        // Aperture centre — destOffsets shift the aperture plane (same as raycaster)
+        double cx = holeCenterX + rightX * data.destOffsetRight + fwdX * data.destOffsetForward;
+        double cy = holeBottomY + data.portalHalfH + data.destOffsetUp;   // vertical centre
+        double cz = holeCenterZ + rightZ * data.destOffsetRight + fwdZ * data.destOffsetForward;
 
         float hw = data.portalHalfW;
         float hh = data.portalHalfH;
