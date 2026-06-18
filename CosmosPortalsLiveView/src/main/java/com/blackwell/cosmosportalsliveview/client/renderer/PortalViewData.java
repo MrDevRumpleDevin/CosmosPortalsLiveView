@@ -47,6 +47,15 @@ public class PortalViewData {
     public volatile float portalBottomY = 0f;
 
     /**
+     * Center X/Z and bottom Y of the destination portal hole (in destination world coords).
+     * Populated once by PortalRenderEventHandler.scanDestHoleCenter() via flood-fill of
+     * BlockPortal blocks near destPos.  NaN = not yet scanned (will retry next frame).
+     */
+    public volatile double destHoleCenterX = Double.NaN;
+    public volatile double destHoleCenterZ = Double.NaN;
+    public volatile double destHoleBottomY = Double.NaN;
+
+    /**
      * Player's lateral offset from the portal center projected onto the portal's
      * right and up axes. Updated each render frame on the main thread.
      * Consumed by captureAsync to shift the virtual camera, producing parallax.

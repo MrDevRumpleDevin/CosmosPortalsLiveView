@@ -128,7 +128,6 @@ public class LocalizedChunkCapture {
         final int      resHSnap  = resH;
         final float    yaw       = portalData.destYaw;
         final float    pitch     = portalData.destPitch;
-        final BlockPos destPos   = portalData.destPos;
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
         // Use the smoothed parallax values so the raycaster sees a continuously
@@ -140,16 +139,23 @@ public class LocalizedChunkCapture {
         final float destOffsetRight  = portalData.destOffsetRight;
         final float destOffsetUp     = portalData.destOffsetUp;
         final float destOffsetForward = portalData.destOffsetForward;
+        // Destination hole center — use scanned portal center, fall back to destPos center if not yet scanned.
+        final double destHoleCenterX = Double.isNaN(portalData.destHoleCenterX)
+                ? portalData.destPos.getX() + 0.5 : portalData.destHoleCenterX;
+        final double destHoleCenterZ = Double.isNaN(portalData.destHoleCenterZ)
+                ? portalData.destPos.getZ() + 0.5 : portalData.destHoleCenterZ;
+        final double destHoleBottomY = Double.isNaN(portalData.destHoleBottomY)
+                ? portalBottomY : portalData.destHoleBottomY;
 
         executorFor(portalData.portalPos).submit(() -> {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
-                image = renderPerspectiveView(levelSnap, destPos, yaw, pitch,
+                image = renderPerspectiveView(levelSnap, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
-                                              portalBottomY,
+                                              destHoleCenterX, destHoleCenterZ, destHoleBottomY,
                                               destOffsetRight, destOffsetUp, destOffsetForward,
                                               entityDots, deadlineNs);
                 final NativeImage finalImage = image;
@@ -197,13 +203,14 @@ public class LocalizedChunkCapture {
 
     // ── Renderer ───────────────────────────────────────────────────────────────
 
-    private static NativeImage renderPerspectiveView(Level level, BlockPos eyePos,
+    private static NativeImage renderPerspectiveView(Level level,
                                                       float yawDeg, float pitchDeg,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp,
                                                       float parallaxForward,
-                                                      float portalBottomY,
+                                                      double destHoleCenterX, double destHoleCenterZ,
+                                                      double destHoleBottomY,
                                                       float destOffsetRight, float destOffsetUp,
                                                       float destOffsetForward,
                                                       List<EntityDot> entityDots,
@@ -248,11 +255,11 @@ public class LocalizedChunkCapture {
         //   X/Z: dest block center + fwdOffset (EYE_FORWARD_OFFSET behind face)
         //        + parallaxRight shifts the whole window laterally
         //   Y:   portalBottomY — bottom of portal, so bottom pixel = floor always.
-        double baseX = eyePos.getX() + 0.5
+        double baseX = destHoleCenterX
                 + fwdX * (EYE_FORWARD_OFFSET + destOffsetForward)
                 + rightX * (destOffsetRight + parallaxRight);
-        double baseY = portalBottomY + destOffsetUp;
-        double baseZ = eyePos.getZ() + 0.5
+        double baseY = destHoleBottomY + destOffsetUp;
+        double baseZ = destHoleCenterZ
                 + fwdZ * (EYE_FORWARD_OFFSET + destOffsetForward)
                 + rightZ * (destOffsetRight + parallaxRight);
 
@@ -887,6 +894,10 @@ public class LocalizedChunkCapture {
     }
 
     // ── Level resolver ─────────────────────────────────────────────────────────
+
+    public static Level resolveSampleLevelPublic(ResourceLocation destDimension, Level clientLevel) {
+        return resolveSampleLevel(destDimension, clientLevel);
+    }
 
     private static Level resolveSampleLevel(ResourceLocation destDimension, Level clientLevel) {
         if (clientLevel == null) return null;

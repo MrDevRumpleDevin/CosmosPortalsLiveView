@@ -244,6 +244,14 @@ public class PortalRenderEventHandler {
             data.destOffsetUp      = LiveViewState.getDestOffsetUp(dockPos);
             data.destOffsetForward = LiveViewState.getDestOffsetForward(dockPos);
 
+            // ── Scan destination portal hole center (once, retry if NaN) ────────
+            if (Double.isNaN(data.destHoleCenterX) && data.destPos != null) {
+                Level destLevel = LocalizedChunkCapture.resolveSampleLevelPublic(data.destDimension, level);
+                if (destLevel != null) {
+                    scanDestHoleCenter(data, destLevel);
+                }
+            }
+
             // ── Per-frame capture trigger ──────────────────────────────────────
             if (capturedThisFrame < portalsPerFrame
                     && data.shouldUpdateCapture(currentTime, captureInterval)) {
@@ -286,6 +294,45 @@ public class PortalRenderEventHandler {
             }
         }
         return null;
+    }
+
+    /**
+     * Scans the destination level around destPos for portal blocks, flood-fills them,
+     * and stores the hole's center X/Z and bottom Y onto data.
+     * Only called once per portal (when destHoleCenterX is NaN); retries if not found.
+     */
+    private static void scanDestHoleCenter(PortalViewData data, Level destLevel) {
+        // Search for any BlockPortal block within a small radius of destPos
+        BlockPos origin = null;
+        int searchR = 8;
+        outer:
+        for (int dx = -searchR; dx <= searchR; dx++) {
+            for (int dy = -searchR; dy <= searchR; dy++) {
+                for (int dz = -searchR; dz <= searchR; dz++) {
+                    BlockPos candidate = data.destPos.offset(dx, dy, dz);
+                    if (destLevel.getBlockState(candidate).getBlock() instanceof BlockPortal) {
+                        origin = candidate;
+                        break outer;
+                    }
+                }
+            }
+        }
+        if (origin == null) {
+            // No dest portal blocks found yet — leave NaN, will retry next frame
+            return;
+        }
+        Set<BlockPos> destBlocks = findConnectedPortalBlocks(destLevel, origin, 256);
+        if (destBlocks.isEmpty()) return;
+
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        for (BlockPos bp : destBlocks) {
+            minX = Math.min(minX, bp.getX()); minY = Math.min(minY, bp.getY()); minZ = Math.min(minZ, bp.getZ());
+            maxX = Math.max(maxX, bp.getX()); maxY = Math.max(maxY, bp.getY()); maxZ = Math.max(maxZ, bp.getZ());
+        }
+        data.destHoleCenterX = (minX + maxX) / 2.0 + 0.5;
+        data.destHoleCenterZ = (minZ + maxZ) / 2.0 + 0.5;
+        data.destHoleBottomY = minY; // world Y of the lowest portal block floor
     }
 
     /**
