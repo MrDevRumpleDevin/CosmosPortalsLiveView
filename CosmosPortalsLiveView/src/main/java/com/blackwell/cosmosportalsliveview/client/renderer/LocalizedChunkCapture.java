@@ -95,7 +95,13 @@ public class LocalizedChunkCapture {
 
     public static void captureAsync(PortalViewData portalData, Level level) {
         if (portalData == null) return;
-        if (portalData.isCaptureInFlight()) return;
+        // Safety: if a capture has been "in-flight" for more than 10 seconds,
+        // something went wrong (execute() never fired, world unloaded mid-capture, etc).
+        // Force-reset the flag so the portal can try again rather than freezing forever.
+        if (portalData.isCaptureInFlight()) {
+            if (!portalData.isCaptureStale()) return;  // still fresh — skip normally
+            portalData.setCaptureInFlight(false);       // stale — force reset and retry
+        }
         if (portalData.destPos == null) return;
 
         Level sampleLevel = resolveSampleLevel(portalData.destDimension, level);
@@ -151,23 +157,17 @@ public class LocalizedChunkCapture {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
-                boolean[] completed = { false };
                 image = renderPerspectiveView(levelSnap, yaw, pitch,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
                                               destHoleCenterX, destHoleCenterZ, destHoleBottomY,
                                               destOffsetRight, destOffsetUp, destOffsetForward,
-                                              entityDots, deadlineNs, completed);
-                if (!completed[0]) {
-                    // Render timed out — discard partial image, keep the last good texture.
-                    // This prevents a sky-filled partial frame from replacing a good one.
-                    final NativeImage discard = image;
-                    image = null;
-                    if (discard != null) { try { discard.close(); } catch (Exception ignored) {} }
-                    portalData.setCaptureInFlight(false);
-                    return;
-                }
+                                              entityDots, deadlineNs);
+                // Always upload — partial frames are pre-filled black (not sky-colored)
+                // so any timeout artifact is obviously wrong rather than subtly wrong.
+                // Discarding partial frames caused portals to never show anything when
+                // the first render was interrupted for any reason.
                 final NativeImage finalImage = image;
                 Minecraft.getInstance().execute(() -> {
                     try {
@@ -224,7 +224,7 @@ public class LocalizedChunkCapture {
                                                       float destOffsetRight, float destOffsetUp,
                                                       float destOffsetForward,
                                                       List<EntityDot> entityDots,
-                                                      long deadlineNs, boolean[] completed) {
+                                                      long deadlineNs) {
         NativeImage image = new NativeImage(NativeImage.Format.RGBA, resW, resH, false);
         // Pre-fill with black — visible only if a pixel's ray somehow produces no color,
         // which shouldn't happen (ddaRay always returns sky on miss). Not sky-colored
@@ -278,11 +278,11 @@ public class LocalizedChunkCapture {
 
         float[] depthBuf = new float[resW * resH];
 
-        completed[0] = false;
         for (int py = 0; py < resH; py++) {
-            // Per-row deadline check: if over budget, abort — the CALLER discards this
-            // partial image and keeps the last good texture. Never upload a partial frame.
-            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) return image;
+            // Per-row deadline check: if over budget, stop ray marching.
+            // The caller always uploads whatever we have — black pre-fill makes
+            // any timeout artifact obviously visible rather than subtly sky-colored.
+            if (py > 0 && (py & 7) == 0 && System.nanoTime() > deadlineNs) break;
 
             // py=0 → top of portal, py=resH-1 → floor
             double ndcY = (py + 0.5) / resH;
@@ -345,7 +345,6 @@ public class LocalizedChunkCapture {
 
         // No vertical flip — raycaster already writes py=0 as sky (top of image).
         // NativeImage in Minecraft is stored top-row-first matching GL_UNPACK_FLIP_ROW_ORDER.
-        completed[0] = true;
         return image;
     }
 
@@ -964,7 +963,10 @@ public class LocalizedChunkCapture {
 
     private static Level resolveSampleLevel(ResourceLocation destDimension, Level clientLevel) {
         if (clientLevel == null) return null;
+        // Same dimension — use the client level directly (always works, SP and MP).
         if (clientLevel.dimension().location().equals(destDimension)) return clientLevel;
+        // Cross-dimension singleplayer — read from the local server's ServerLevel.
+        // The server is in the same JVM so we can safely access its level data.
         Minecraft mc = Minecraft.getInstance();
         if (mc.getSingleplayerServer() != null) {
             net.minecraft.resources.ResourceKey<Level> destKey =
@@ -974,6 +976,11 @@ public class LocalizedChunkCapture {
                     mc.getSingleplayerServer().getLevel(destKey);
             if (serverLevel != null) return serverLevel;
         }
+        // Cross-dimension multiplayer — the destination ClientLevel is not loaded
+        // on this client (Minecraft only keeps the current dimension's ClientLevel).
+        // Cannot render without server-side block data. Return null to skip gracefully.
+        // Future: implement a server→client block-data packet for this case.
         return null;
     }
 }
+
