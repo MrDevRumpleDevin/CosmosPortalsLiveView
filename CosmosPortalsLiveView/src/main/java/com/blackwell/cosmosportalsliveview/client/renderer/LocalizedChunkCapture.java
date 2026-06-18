@@ -116,6 +116,8 @@ public class LocalizedChunkCapture {
             resW = Math.max(16, Math.min(baseRes, (int)(baseRes * aspect)));
         }
 
+        // Skip render until dest forward direction is known (scanDestHoleCenter not done yet)
+        if (Double.isNaN(portalData.destFwdX)) return;
         portalData.setCaptureInFlight(true);
         // Stamp time NOW (at submission) so shouldUpdateCapture backs off for this portal
         // immediately, freeing capturedThisFrame slots for other portals next frame.
@@ -126,10 +128,9 @@ public class LocalizedChunkCapture {
         final Level    levelSnap = sampleLevel;
         final int      resWSnap  = resW;
         final int      resHSnap  = resH;
-        // Ray direction is derived from the portal's physical axis — not from stored
-        // destYaw/destPitch (those are unreliable: CosmosPortals swaps the labels AND they
-        // represent arrival orientation, not portal face normal).
-        final boolean  axisIsX   = portalData.portalAxisIsX;
+        // Ray forward direction probed geometrically at scan time — stored in destFwdX/Z.
+        final double   destFwdX  = portalData.destFwdX;
+        final double   destFwdZ  = portalData.destFwdZ;
         final float    halfWSnap = halfW;
         final float    halfHSnap = halfH;
         // Use the smoothed parallax values so the raycaster sees a continuously
@@ -153,7 +154,8 @@ public class LocalizedChunkCapture {
             NativeImage image = null;
             try {
                 long deadlineNs = System.nanoTime() + RENDER_BUDGET_NS;
-                image = renderPerspectiveView(levelSnap, axisIsX,
+                image = renderPerspectiveView(levelSnap,
+                                              destFwdX, destFwdZ,
                                               resWSnap, resHSnap,
                                               halfWSnap, halfHSnap,
                                               parallaxRight, parallaxUp, parallaxForward,
@@ -206,7 +208,7 @@ public class LocalizedChunkCapture {
     // ── Renderer ───────────────────────────────────────────────────────────────
 
     private static NativeImage renderPerspectiveView(Level level,
-                                                      boolean axisIsX,
+                                                      double destFwdX, double destFwdZ,
                                                       int resW, int resH,
                                                       float portalHalfW, float portalHalfH,
                                                       float parallaxRight, float parallaxUp,
@@ -224,37 +226,20 @@ public class LocalizedChunkCapture {
             for (int fx = 0; fx < resW; fx++)
                 image.setPixelRGBA(fx, fy, skyFill);
 
-        // ── Forward / right basis from portal axis geometry ────────────────────────
+        // ── Forward / right basis from geometrically-probed dest room direction ──
         //
-        //   axisIsX = true  → portal face spans X, face normal is ±Z
-        //     forward = ±Z,  right = +X
-        //   axisIsX = false → portal face spans Z, face normal is ±X
-        //     forward = ±X,  right = +Z
+        // destFwdX/Z were determined by scanDestHoleCenter() which counts solid blocks
+        // on each side of the dest portal and picks the side with more blocks as "the room".
+        // This avoids the ±ambiguity of axis+parallaxForward sign that plagued previous attempts.
         //
-        // parallaxForward sign picks which of the two opposite normals to use:
-        //   parallaxForward > 0 → player is on the +normal side, rays fire in +normal dir
-        //   parallaxForward < 0 → player is on the -normal side, rays fire in -normal dir
-        //   (= 0: player is dead-center on the portal face; keep last direction — use signum or default +1)
-        // The player on the +Z side of an axis=X portal is LOOKING toward -Z.
-        // Rays at the destination must fire in -Z (into the room), not +Z (away from it).
-        // So forward sign is OPPOSITE to parallaxForward sign.
-        double fwdSign = (parallaxForward >= 0.0f) ? -1.0 : 1.0;
-
-        double fwdX, fwdZ, rightX, rightZ;
-        if (axisIsX) {
-            // Portal spans X-axis, face normal is Z
-            fwdX   = 0.0;
-            fwdZ   = fwdSign;   // −Z when player on +Z side (looking into room), +Z when on -Z side
-            rightX = 1.0;
-            rightZ = 0.0;
-        } else {
-            // Portal spans Z-axis, face normal is X
-            fwdX   = fwdSign;   // −X when player on +X side (looking into room), +X when on -X side
-            fwdZ   = 0.0;
-            rightX = 0.0;
-            rightZ = 1.0;
-        }
-        double fwdY = 0.0;
+        // right = cross(fwd, up) = cross((fwdX,0,fwdZ), (0,1,0)) = (-fwdZ, 0, fwdX)
+        //   fwd=(0,0,-1) → right=(1,0,0)   ✓  (north-facing portal, right is +X)
+        //   fwd=(-1,0,0) → right=(0,0,-1)  ✓  (east-facing portal, right is -Z)
+        double fwdX   = destFwdX;
+        double fwdZ   = destFwdZ;
+        double fwdY   = 0.0;
+        double rightX = -fwdZ;
+        double rightZ =  fwdX;
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;

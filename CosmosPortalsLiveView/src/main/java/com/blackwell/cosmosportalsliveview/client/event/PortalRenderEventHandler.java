@@ -343,6 +343,51 @@ public class PortalRenderEventHandler {
         data.destHoleCenterX = (minX + maxX) / 2.0 + 0.5;
         data.destHoleCenterZ = (minZ + maxZ) / 2.0 + 0.5;
         data.destHoleBottomY = minY; // world Y of the lowest portal block floor
+
+        // ── Determine forward direction: which side of the dest portal has the room ──
+        // Probe ±normal from the dest hole center at mid-height.
+        // The "room" side is the direction that has non-portal solid/air blocks (not more portal blocks).
+        // We probe up to 5 blocks in each normal direction and score each side.
+        int spanX = maxX - minX;
+        int spanZ = maxZ - minZ;
+        // normal is along the axis with zero span (portal face normal)
+        boolean destAxisIsX = spanX >= spanZ; // portal spans X → normal is ±Z
+        int midY = (minY + maxY) / 2;
+        double cx = data.destHoleCenterX;
+        double cz = data.destHoleCenterZ;
+
+        // Candidate normals
+        int[] normDX = destAxisIsX ? new int[]{0, 0}  : new int[]{1, -1};
+        int[] normDZ = destAxisIsX ? new int[]{1, -1} : new int[]{0, 0};
+
+        int scorePos = 0, scoreNeg = 0;
+        int probeRange = 5;
+        for (int step = 1; step <= probeRange; step++) {
+            // Positive normal direction
+            BlockPos bPos = new BlockPos((int)Math.floor(cx) + normDX[0]*step,
+                                         midY,
+                                         (int)Math.floor(cz) + normDZ[0]*step);
+            BlockState stPos = destLevel.getBlockState(bPos);
+            if (!stPos.isAir() && !(stPos.getBlock() instanceof BlockPortal)) scorePos++;
+
+            // Negative normal direction
+            BlockPos bNeg = new BlockPos((int)Math.floor(cx) + normDX[1]*step,
+                                         midY,
+                                         (int)Math.floor(cz) + normDZ[1]*step);
+            BlockState stNeg = destLevel.getBlockState(bNeg);
+            if (!stNeg.isAir() && !(stNeg.getBlock() instanceof BlockPortal)) scoreNeg++;
+        }
+
+        // The side with more solid blocks is the "room" — rays fire in that direction.
+        // If tied (open rooms on both sides or all air), default to +normal.
+        int sign = (scoreNeg > scorePos) ? -1 : 1;
+        if (destAxisIsX) {
+            data.destFwdX = 0.0;
+            data.destFwdZ = sign; // +Z or -Z
+        } else {
+            data.destFwdX = sign; // +X or -X
+            data.destFwdZ = 0.0;
+        }
     }
 
     /**

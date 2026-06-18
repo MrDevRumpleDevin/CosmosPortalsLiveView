@@ -58,6 +58,15 @@ public class PortalViewData {
     public volatile double destHoleBottomY = Double.NaN;
 
     /**
+     * Forward direction for rays at the destination — the unit vector pointing INTO the
+     * destination room, perpendicular to the dest portal face.
+     * Determined by probing which side of the dest portal has non-portal solid blocks.
+     * NaN = not yet determined (scan hasn't run or probe was inconclusive).
+     */
+    public volatile double destFwdX = Double.NaN;
+    public volatile double destFwdZ = Double.NaN;
+
+    /**
      * Player's lateral offset from the portal center projected onto the portal's
      * right and up axes. Updated each render frame on the main thread.
      * Consumed by captureAsync to shift the virtual camera, producing parallax.
